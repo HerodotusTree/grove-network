@@ -13,6 +13,7 @@ go build -o grove-node .
 |--------|-----------|-------------------------------------------------|
 | POST   | /deposit  | `{"amount":100}` — deposit, mints equal claim    |
 | POST   | /redeem   | `{"amount":25}` — redeem, 1:1 (pro-rata if impaired) |
+| POST   | /tip      | `{"amount":25}` — tip the floor, mints no claims   |
 | GET    | /state    | reserves, claims, surplus                       |
 | GET    | /ledger   | full hash-chained operation log (verified first)|
 | GET    | /metrics  | op telemetry: attempted/succeeded/rejected, invariant violations, uptime |
@@ -41,4 +42,5 @@ curl -X POST localhost:8080/sync
 - Deposits move reserves and claims equally; S unchanged.
 - Intake closes while impaired (R < C); redemptions go pro-rata at R/C.
 - Every accepted operation is appended to the hash-chained ledger.
+- Tips feed the non-redeemable floor; claims are never minted from tips.
 - Integer minor units only. No floating point.
