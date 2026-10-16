@@ -301,7 +301,7 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	adopted := false
 	if len(best) > s.v.Log.Len() {
-		if err := s.v.Log.Adopt(best); err != nil {
+		if err := s.v.Log.Adopt(best, s.chainPath); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "adopt failed: " + err.Error()})
 			return
 		}

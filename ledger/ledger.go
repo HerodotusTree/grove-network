@@ -30,6 +30,7 @@ func (e *Entry) computeHash() string {
 // Ledger is an in-memory hash-chained log.
 type Ledger struct {
 	entries []Entry
+	journaled uint64 // leading entries already durable (snapshot or journal)
 }
 
 // New returns an empty ledger.
