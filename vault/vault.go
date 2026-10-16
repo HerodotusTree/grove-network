@@ -10,6 +10,8 @@ package vault
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"math/bits"
 
 	"github.com/HerodotusTree/grove-network/ledger"
 )
@@ -51,6 +53,9 @@ func (v *Vault) Deposit(amount int64) error {
 	if v.R < v.C {
 		return fmt.Errorf("deposit: intake closed while impaired (R=%d < C=%d)", v.R, v.C)
 	}
+	if v.R > math.MaxInt64-amount || v.C > math.MaxInt64-amount {
+		return fmt.Errorf("deposit: amount %d would overflow reserves/claims", amount)
+	}
 	v.R += amount
 	v.C += amount
 	v.record("deposit", amount)
@@ -65,10 +70,23 @@ func (v *Vault) Tip(amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("tip: amount must be positive")
 	}
+	if v.R > math.MaxInt64-amount || v.Floor > math.MaxInt64-amount {
+		return fmt.Errorf("tip: amount %d would overflow reserves/floor", amount)
+	}
 	v.R += amount
 	v.Floor += amount
 	v.record("tip", amount)
 	return nil
+}
+
+// mulDiv returns floor(a*b/c) without overflow. All args must be
+// non-negative, c must be positive, and the true quotient must fit
+// in an int64 (guaranteed by the caller: amount <= C, so the
+// pro-rata payout never exceeds R).
+func mulDiv(a, b, c int64) int64 {
+	hi, lo := bits.Mul64(uint64(a), uint64(b))
+	q, _ := bits.Div64(hi, lo, uint64(c))
+	return int64(q)
 }
 
 // Redeem burns claims and pays out reserves 1:1 while healthy.
@@ -82,7 +100,7 @@ func (v *Vault) Redeem(amount int64) (int64, error) {
 	}
 	payout := amount
 	if v.R < v.C {
-		payout = amount * v.R / v.C // pro-rata in impairment
+		payout = mulDiv(amount, v.R, v.C) // pro-rata in impairment, overflow-safe
 	}
 	before := v.Surplus()
 	v.C -= amount

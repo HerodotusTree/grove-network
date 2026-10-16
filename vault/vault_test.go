@@ -81,3 +81,25 @@ func TestTipRatchetsFloor(t *testing.T) {
 		t.Fatalf("want S=25, got %d", v.Surplus())
 	}
 }
+func TestOverflowRejected(t *testing.T) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	v := New(ledger.New())
+	if err := v.Deposit(maxInt64); err != nil {
+		t.Fatalf("max-int64 deposit should be accepted: %v", err)
+	}
+	if err := v.Deposit(1); err == nil {
+		t.Fatal("deposit past int64 range must be rejected")
+	}
+	if v.R != maxInt64 || v.C != maxInt64 {
+		t.Fatalf("rejected op changed state: R=%d C=%d", v.R, v.C)
+	}
+	if err := v.Tip(1); err == nil {
+		t.Fatal("tip past int64 range must be rejected")
+	}
+	if p, err := v.Redeem(maxInt64); err != nil || p != maxInt64 {
+		t.Fatalf("redeem at max int64: payout=%d err=%v", p, err)
+	}
+	if v.R != 0 || v.C != 0 || v.Surplus() != 0 {
+		t.Fatalf("after full redeem: R=%d C=%d S=%d", v.R, v.C, v.Surplus())
+	}
+}
