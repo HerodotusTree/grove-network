@@ -4,3 +4,4 @@ grove-node
 # local node data (your chain is yours)
 grove-data/
 grove-data-*/ 
+loadgen
