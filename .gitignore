@@ -1,0 +1,6 @@
+# built binaries
+grove-node
+*.exe
+# local node data (your chain is yours)
+grove-data/
+grove-data-*/ 
