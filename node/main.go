@@ -83,7 +83,7 @@ func (s *server) rebuildState(v *vault.Vault) error {
 		if err := json.Unmarshal([]byte(v.Log.Entries()[n-1].Payload), &op); err != nil {
 			return fmt.Errorf("replay: %w", err)
 		}
-		v.R, v.C = op.R, op.C
+		v.R, v.C, v.Floor = op.R, op.C, op.Floor
 	}
 	return nil
 }
@@ -107,6 +107,7 @@ func (s *server) state() map[string]int64 {
 		"reserves": s.v.R,
 		"claims":   s.v.C,
 		"surplus":  s.v.Surplus(),
+		"floor":    s.v.Floor,
 	}
 }
 
@@ -183,6 +184,33 @@ func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 	resp := s.state()
 	resp["payout"] = payout
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *server) handleTip(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	var req amountReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad JSON"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m.OpsAttempted++
+	before := s.v.Surplus()
+	if err := s.v.Tip(req.Amount); err != nil {
+		s.m.OpsRejected++
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+		return
+	}
+	s.checkInvariant(before)
+	if !s.persist(w) {
+		return
+	}
+	s.m.OpsSucceeded++
+	writeJSON(w, http.StatusOK, s.state())
 }
 
 func (s *server) handleState(w http.ResponseWriter, r *http.Request) {
@@ -314,6 +342,7 @@ func main() {
 
 	http.HandleFunc("/deposit", s.handleDeposit)
 	http.HandleFunc("/redeem", s.handleRedeem)
+	http.HandleFunc("/tip", s.handleTip)
 	http.HandleFunc("/state", s.handleState)
 	http.HandleFunc("/ledger", s.handleLedger)
 	http.HandleFunc("/metrics", s.handleMetrics)

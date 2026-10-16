@@ -53,3 +53,31 @@ func TestImpairment(t *testing.T) {
 	}
 }
 
+func TestTipRatchetsFloor(t *testing.T) {
+	v := New(ledger.New())
+	if err := v.Deposit(100); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Tip(25); err != nil {
+		t.Fatal(err)
+	}
+	if v.Floor != 25 {
+		t.Fatalf("want floor 25, got %d", v.Floor)
+	}
+	if v.C != 100 {
+		t.Fatalf("tip must not mint claims: want C=100, got %d", v.C)
+	}
+	if v.Surplus() != 25 {
+		t.Fatalf("want S=25, got %d", v.Surplus())
+	}
+	// The floor holds through redemption: redeem everything, floor stays.
+	if _, err := v.Redeem(100); err != nil {
+		t.Fatal(err)
+	}
+	if v.Floor != 25 {
+		t.Fatalf("floor must survive redemption: want 25, got %d", v.Floor)
+	}
+	if v.Surplus() != 25 {
+		t.Fatalf("want S=25, got %d", v.Surplus())
+	}
+}

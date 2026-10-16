@@ -2,6 +2,9 @@
 // with the absolute-surplus invariant S = R - C, non-decreasing.
 // All amounts are integer minor units. Every accepted operation is
 // appended to the hash-chained ledger.
+//
+// Tips feed the floor: they add to reserves and to the non-redeemable
+// floor ledger, ratcheting the floor up without minting claims.
 package vault
 
 import (
@@ -13,17 +16,19 @@ import (
 
 // Op is a vault operation recorded on the ledger.
 type Op struct {
-	Kind   string `json:"kind"` // "deposit" or "redeem"
+	Kind   string `json:"kind"` // "deposit", "redeem", or "tip"
 	Amount int64  `json:"amount"`
 	R      int64  `json:"reserves_after"`
 	C      int64  `json:"claims_after"`
+	Floor  int64  `json:"floor_after"`
 }
 
-// Vault holds reserves R and redeemable claims C.
+// Vault holds reserves R, redeemable claims C, and the non-redeemable floor.
 type Vault struct {
-	R   int64
-	C   int64
-	Log *ledger.Ledger
+	R     int64
+	C     int64
+	Floor int64
+	Log   *ledger.Ledger
 }
 
 // New returns a vault wired to the given ledger.
@@ -33,7 +38,7 @@ func New(log *ledger.Ledger) *Vault { return &Vault{Log: log} }
 func (v *Vault) Surplus() int64 { return v.R - v.C }
 
 func (v *Vault) record(kind string, amount int64) {
-	rec, _ := json.Marshal(Op{Kind: kind, Amount: amount, R: v.R, C: v.C})
+	rec, _ := json.Marshal(Op{Kind: kind, Amount: amount, R: v.R, C: v.C, Floor: v.Floor})
 	v.Log.Append(string(rec))
 }
 
@@ -49,6 +54,20 @@ func (v *Vault) Deposit(amount int64) error {
 	v.R += amount
 	v.C += amount
 	v.record("deposit", amount)
+	return nil
+}
+
+// Tip is a gift to the floor: it adds to reserves and to the
+// non-redeemable floor ledger, minting no claims. S grows by amount.
+// Tips are how the floor ratchets up; without them it holds flat,
+// never down.
+func (v *Vault) Tip(amount int64) error {
+	if amount <= 0 {
+		return fmt.Errorf("tip: amount must be positive")
+	}
+	v.R += amount
+	v.Floor += amount
+	v.record("tip", amount)
 	return nil
 }
 
@@ -77,4 +96,3 @@ func (v *Vault) Redeem(amount int64) (int64, error) {
 	v.record("redeem", amount)
 	return payout, nil
 }
-
