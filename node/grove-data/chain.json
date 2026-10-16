@@ -1,0 +1,9 @@
+[
+  {
+    "index": 0,
+    "timestamp": 1792164548,
+    "payload": "{\"kind\":\"deposit\",\"amount\":50,\"reserves_after\":50,\"claims_after\":50}",
+    "prev_hash": "",
+    "hash": "f15a0dd04996871ac7fb347eb46adeb948923eaa0880474c40e5f751e0d4135a"
+  }
+]
