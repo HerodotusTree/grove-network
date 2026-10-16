@@ -2,16 +2,22 @@
 // accepts vault operations in order and appends each one to the
 // hash-chained ledger. One operation at a time — nothing jumps the line.
 //
-// The chain is persisted to grove-data/chain.json after every operation
+// The chain is persisted to <data>/chain.json after every operation
 // and reloaded on startup, so the node remembers across restarts.
 //
 // /metrics reports the efficiency telemetry: every operation counted,
 // every invariant check recorded. This is the data the 99.99% bar is
 // measured against.
+//
+// Peers: POST /peers {"url":"http://host:port"} registers a peer.
+// POST /sync pulls each peer's chain and adopts the longest valid one.
+// A chain that fails verification is refused, never merged — no trust
+// required, only math.
 package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,9 +29,6 @@ import (
 	"github.com/HerodotusTree/grove-network/vault"
 )
 
-const dataDir = "grove-data"
-const chainPath = "grove-data/chain.json"
-
 // Metrics is the node's efficiency telemetry.
 type Metrics struct {
 	StartedAt           time.Time `json:"started_at"`
@@ -36,23 +39,30 @@ type Metrics struct {
 	InvariantViolations uint64    `json:"invariant_violations"`
 	LedgerEntries       int       `json:"ledger_entries"`
 	ChainValid          bool      `json:"chain_valid"`
+	Peers               int       `json:"peers"`
 }
 
 type server struct {
-	mu      sync.Mutex
-	v       *vault.Vault
-	started time.Time
-	m       Metrics
+	mu        sync.Mutex
+	v         *vault.Vault
+	started   time.Time
+	m         Metrics
+	peers     []string
+	dataDir   string
+	chainPath string
+	port      string
 }
+
+func (s *server) chainFile() string { return s.chainPath }
 
 // loadOrNew loads the persisted chain if it exists and rebuilds the
 // vault's state from the last recorded operation. A broken chain on
 // disk refuses to start — the node will not run on lies.
-func loadOrNew() (*vault.Vault, error) {
-	if err := os.MkdirAll(dataDir, 0700); err != nil {
+func (s *server) loadOrNew() (*vault.Vault, error) {
+	if err := os.MkdirAll(s.dataDir, 0700); err != nil {
 		return nil, err
 	}
-	l, err := ledger.Load(chainPath)
+	l, err := ledger.Load(s.chainPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return vault.New(ledger.New()), nil
@@ -60,18 +70,30 @@ func loadOrNew() (*vault.Vault, error) {
 		return nil, err
 	}
 	v := vault.New(l)
-	if n := l.Len(); n > 0 {
-		var op vault.Op
-		if err := json.Unmarshal([]byte(l.Entries()[n-1].Payload), &op); err != nil {
-			return nil, fmt.Errorf("replay: %w", err)
-		}
-		v.R, v.C = op.R, op.C
+	if err := s.rebuildState(v); err != nil {
+		return nil, err
 	}
 	return v, nil
 }
 
+// rebuildState replays the last recorded operation to restore R and C.
+func (s *server) rebuildState(v *vault.Vault) error {
+	if n := v.Log.Len(); n > 0 {
+		var op vault.Op
+		if err := json.Unmarshal([]byte(v.Log.Entries()[n-1].Payload), &op); err != nil {
+			return fmt.Errorf("replay: %w", err)
+		}
+		v.R, v.C = op.R, op.C
+	}
+	return nil
+}
+
 type amountReq struct {
 	Amount int64 `json:"amount"`
+}
+
+type peerReq struct {
+	URL string `json:"url"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -91,7 +113,7 @@ func (s *server) state() map[string]int64 {
 // persist saves the chain. Called with the lock held, after every
 // accepted operation.
 func (s *server) persist(w http.ResponseWriter) bool {
-	if err := s.v.Log.Save(chainPath); err != nil {
+	if err := s.v.Log.Save(s.chainPath); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "persist failed: " + err.Error()})
 		return false
 	}
@@ -189,21 +211,114 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	m.UptimeSeconds = int64(time.Since(s.started).Seconds())
 	m.LedgerEntries = s.v.Log.Len()
 	m.ChainValid = s.v.Log.Verify() == nil
+	m.Peers = len(s.peers)
 	writeJSON(w, http.StatusOK, m)
 }
 
+func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+	case http.MethodPost:
+		var req peerReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad JSON, want {\"url\": ...}"})
+			return
+		}
+		for _, p := range s.peers {
+			if p == req.URL {
+				writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+				return
+			}
+		}
+		s.peers = append(s.peers, req.URL)
+		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+	default:
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST only"})
+	}
+}
+
+// handleSync pulls every peer's chain and adopts the longest valid one.
+func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	client := &http.Client{Timeout: 10 * time.Second}
+	best := s.v.Log.Entries()
+	bestFrom := ""
+	for _, peer := range s.peers {
+		resp, err := client.Get(peer + "/ledger")
+		if err != nil {
+			continue
+		}
+		var entries []ledger.Entry
+		if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+			resp.Body.Close()
+			continue
+		}
+		resp.Body.Close()
+		if len(entries) <= len(best) {
+			continue
+		}
+		if err := ledger.VerifyEntries(entries); err != nil {
+			continue
+		}
+		best = entries
+		bestFrom = peer
+	}
+	adopted := false
+	if len(best) > s.v.Log.Len() {
+		if err := s.v.Log.Adopt(best); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "adopt failed: " + err.Error()})
+			return
+		}
+		if err := s.rebuildState(s.v); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		if !s.persist(w) {
+			return
+		}
+		adopted = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"adopted":      adopted,
+		"from":         bestFrom,
+		"ledger_entries": s.v.Log.Len(),
+		"state":        s.state(),
+	})
+}
+
 func main() {
-	v, err := loadOrNew()
+	port := flag.String("port", "8080", "listen port")
+	data := flag.String("data", "grove-data", "data directory")
+	flag.Parse()
+
+	s := &server{
+		started:   time.Now(),
+		dataDir:   *data,
+		chainPath: *data + "/chain.json",
+		port:      *port,
+	}
+	v, err := s.loadOrNew()
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
-	s := &server{v: v, started: time.Now()}
+	s.v = v
 	s.m.StartedAt = s.started
+
 	http.HandleFunc("/deposit", s.handleDeposit)
 	http.HandleFunc("/redeem", s.handleRedeem)
 	http.HandleFunc("/state", s.handleState)
 	http.HandleFunc("/ledger", s.handleLedger)
 	http.HandleFunc("/metrics", s.handleMetrics)
-	fmt.Println("Grove sequencer listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	http.HandleFunc("/peers", s.handlePeers)
+	http.HandleFunc("/sync", s.handleSync)
+	fmt.Printf("Grove sequencer listening on :%s (data: %s)\n", s.port, s.dataDir)
+	log.Fatal(http.ListenAndServe(":"+s.port, nil))
 }
