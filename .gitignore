@@ -5,3 +5,4 @@ grove-node
 grove-data/
 grove-data-*/ 
 loadgen
+node/node

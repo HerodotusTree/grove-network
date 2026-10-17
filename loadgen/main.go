@@ -1,7 +1,12 @@
-// Command loadgen hammers a Grove node with random operations to
+// Command loadgen hammers a Grove node with random signed operations to
 // measure its efficiency. Usage:
 //
 //	go run . -url http://localhost:8080 -ops 1000 -workers 4
+//
+// Every worker generates its own keypair at startup and signs each op
+// with a strictly increasing nonce. One account per worker: sharing a
+// single account across concurrent workers would deliver nonces out of
+// order, and the node (correctly) rejects anything but last+1.
 package main
 
 import (
@@ -14,16 +19,42 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/HerodotusTree/grove-network/identity"
 )
 
-func post(url string, amount int64) bool {
-	body, _ := json.Marshal(map[string]int64{"amount": amount})
+type signer struct {
+	priv    string
+	account string
+	// next is the nonce to try next. It advances ONLY when the server
+	// accepts the op: the node advances its record only on acceptance
+	// too, so a rejected attempt must be retried with the same nonce,
+	// never skipped. (A client that numbers attempts instead of
+	// acceptances desyncs permanently after its first rejection.)
+	next uint64
+}
+
+func (s *signer) post(url, op string, amount int64) bool {
+	sig, err := identity.Sign(s.priv, identity.Payload(op, s.account, amount, s.next))
+	if err != nil {
+		return false
+	}
+	body, _ := json.Marshal(map[string]any{
+		"account":   s.account,
+		"amount":    amount,
+		"nonce":     s.next,
+		"signature": sig,
+	})
 	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode == http.StatusOK {
+		s.next++
+		return true
+	}
+	return false
 }
 
 func main() {
@@ -44,15 +75,21 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			priv, pub, err := identity.Generate()
+			if err != nil {
+				for range jobs {
+					atomic.AddInt64(&fail, 1)
+				}
+				return
+			}
+			s := &signer{priv: priv, account: pub, next: 1}
 			for range jobs {
 				amount := int64(rand.Intn(100) + 1)
-				var good bool
+				op := identity.OpDeposit
 				if rand.Intn(2) == 0 {
-					good = post(*url+"/deposit", amount)
-				} else {
-					good = post(*url+"/redeem", amount)
+					op = identity.OpRedeem
 				}
-				if good {
+				if s.post(*url+"/"+op, op, amount) {
 					atomic.AddInt64(&ok, 1)
 				} else {
 					atomic.AddInt64(&fail, 1)
