@@ -15,10 +15,13 @@
 // payload plus a strictly increasing nonce, so a signed request works
 // exactly once and can never be replayed or retargeted.
 //
-// Peers: POST /peers {"url":"http://host:port"} registers a peer.
-// POST /sync pulls each peer's chain and adopts the longest valid one.
-// A chain that fails verification is refused, never merged — no trust
-// required, only math.
+// Peers: POST /peers {"url":"http://host:port"} registers a peer. The URL
+// must be a bare http(s) base URL — no path, query, fragment, or
+// userinfo — because sync appends "/ledger" to it verbatim; anything
+// else is rejected at registration (issue #7). POST /sync pulls each
+// peer's chain and adopts the longest valid one, without holding the op
+// lock during the network fetches (issue #6). A chain that fails
+// verification is refused, never merged — no trust required, only math.
 package main
 
 import (
@@ -27,6 +30,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sync"
 	"time"
@@ -361,53 +365,163 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	switch r.Method {
 	case http.MethodGet:
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
 	case http.MethodPost:
+		// Decode and validate BEFORE taking the op lock. The request
+		// body is network I/O: holding s.mu across it would let any
+		// unauthenticated client freeze deposits, redeems, tips,
+		// /state and /metrics with a stalled body (issue #6 class).
+		// Same pattern as the signed handlers below.
 		var req peerReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad JSON, want {\"url\": ...}"})
 			return
 		}
+		// Issue #7: the peer URL is attacker-influenced input that the
+		// node later fetches on demand, so it is validated up front and
+		// stored in canonical form.
+		canonical, err := validatePeerURL(req.URL)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
 		for _, p := range s.peers {
-			if p == req.URL {
+			if p == canonical {
 				writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
 				return
 			}
 		}
-		s.peers = append(s.peers, req.URL)
+		s.peers = append(s.peers, canonical)
 		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST only"})
 	}
 }
 
+// validatePeerURL enforces the peer contract {"url":"http://host:port"}.
+// handleSync appends "/ledger" to the registered string verbatim, so the
+// demonstrated SSRF (issue #7) rode on a URL path prefix that steered the
+// fetch to an attacker-chosen destination. Registration therefore
+// accepts only a bare http(s) base URL and rejects:
+//   - non-http(s) schemes (gopher/file/ftp have no business here),
+//   - userinfo (user:pass@ smuggling and credential leakage),
+//   - fragments and queries (never part of the fetch target, but they
+//     make logs and dedup lie),
+//   - non-empty paths (the prefix that carried the demonstrated attack).
+//
+// It returns the canonical base URL, so "http://h/" and "http://h"
+// dedup to the same peer. This is deliberately syntactic: it closes the
+// demonstrated vector, not all SSRF (a bare http://internal-host:port is
+// still fetchable). Full peer authorization policy is AUTH-02's call;
+// defense in depth (revalidation at fetch time, no redirect following)
+// sits below.
+func validatePeerURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("bad peer URL: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("bad peer URL: scheme must be http or https")
+	}
+	if u.Host == "" {
+		return "", fmt.Errorf("bad peer URL: missing host")
+	}
+	if u.Opaque != "" {
+		return "", fmt.Errorf("bad peer URL: opaque URL not allowed")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("bad peer URL: userinfo not allowed")
+	}
+	if u.Fragment != "" || u.RawFragment != "" {
+		return "", fmt.Errorf("bad peer URL: fragment not allowed")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("bad peer URL: query not allowed")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("bad peer URL: path not allowed, want a bare http://host:port base URL")
+	}
+	u.Path, u.RawPath = "", ""
+	u.Fragment, u.RawFragment = "", ""
+	u.RawQuery = ""
+	// A bare "?" sets ForceQuery, which u.String() would preserve as a
+	// trailing "?" — registering "http://h" and "http://h?" as two
+	// peers and, worse, turning the fetch into "http://h?/ledger"
+	// (GET / with query "/ledger") instead of the contracted
+	// GET /ledger. A bare base URL never carries a query marker.
+	u.ForceQuery = false
+	return u.String(), nil
+}
+
+// fetchPeerLedger GETs peer+"/ledger" and decodes the entry list. Any
+// network error, non-200 status, or undecodable body means the peer is
+// skipped — sync never trusts the network, it only adopts a longer chain
+// that verifies.
+func fetchPeerLedger(client *http.Client, peer string) ([]ledger.Entry, error) {
+	resp, err := client.Get(peer + "/ledger")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer %s: unexpected status %d", peer, resp.StatusCode)
+	}
+	var entries []ledger.Entry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
 // handleSync pulls every peer's chain and adopts the longest valid one.
+//
+// Hardened (issues #6, #7): the peer list and the local chain length are
+// snapshotted under the op lock, but the lock is NOT held during the
+// outbound peer fetches — a slow or malicious peer can no longer freeze
+// deposits, redeems, tips, /state or /metrics (#6). Fetches never follow
+// redirects, so a peer cannot 302 the node onto an internal destination
+// (#7). Adoption happens back under the lock, and only if nothing was
+// appended locally while the fetch was in flight: a longer peer chain
+// must never silently discard operations that landed during the network
+// wait.
 func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	client := &http.Client{Timeout: 10 * time.Second}
-	best := s.v.Log.Entries()
+	peers := append([]string(nil), s.peers...)
+	localLen := s.v.Log.Len()
+	s.mu.Unlock()
+
+	// The op lock is released from here until adoption. No code path
+	// below does network I/O while holding s.mu.
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	var best []ledger.Entry
 	bestFrom := ""
-	for _, peer := range s.peers {
-		resp, err := client.Get(peer + "/ledger")
+	for _, peer := range peers {
+		// Defense in depth: never fetch a peer we would not register
+		// today (stored before validation existed, or injected past the
+		// handler) — skip it instead.
+		if _, err := validatePeerURL(peer); err != nil {
+			continue
+		}
+		entries, err := fetchPeerLedger(client, peer)
 		if err != nil {
 			continue
 		}
-		var entries []ledger.Entry
-		if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
-			resp.Body.Close()
-			continue
-		}
-		resp.Body.Close()
-		if len(entries) <= len(best) {
+		if len(entries) <= localLen || len(entries) <= len(best) {
 			continue
 		}
 		if err := ledger.VerifyEntries(entries); err != nil {
@@ -416,8 +530,11 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		best = entries
 		bestFrom = peer
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	adopted := false
-	if len(best) > s.v.Log.Len() {
+	if len(best) > localLen && s.v.Log.Len() == localLen {
 		if err := s.v.Log.Adopt(best, s.chainPath); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "adopt failed: " + err.Error()})
 			return

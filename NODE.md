@@ -85,7 +85,7 @@ comes back 401 until you go back to the right number.
 | GET    | /ledger   | full hash-chained operation log (verified first)                    |
 | GET    | /metrics  | op telemetry: attempted/succeeded/rejected, invariant violations, uptime |
 | GET    | /peers    | list known peers                                                    |
-| POST   | /peers    | `{"url":"http://host:port"}` — register a peer                      |
+| POST   | /peers    | `{"url":"http://host:port"}` — register a peer (bare base URL; validated) |
 | POST   | /sync     | adopt the longest valid peer chain                                  |
 
 ## Try it
@@ -224,8 +224,20 @@ and will fail until sync hardening acceptance rules are implemented.)
   non-monetary test accounting.
 - *Open static surface:* static analysis identified additional unverified
   vectors in the sync path that remain open for formal testing:
-  - lack of URL validation on registered peers (potential SSRF);
-  - holding the global node mutex across outbound peer HTTP calls;
+  - lack of URL validation on registered peers (potential SSRF) —
+    HARDENED: POST /peers now enforces the documented
+    {"url":"http://host:port"} contract (bare http(s) base URL only;
+    paths, queries, fragments, userinfo, and non-http(s) schemes are
+    rejected with 400), fetches never follow redirects, and peer URLs
+    are revalidated at fetch time. Residual: a bare
+    http://internal-host:port is still fetchable — full peer
+    authorization policy is AUTH-02's call.
+  - holding the global node mutex across outbound peer HTTP calls —
+    HARDENED: /sync snapshots the peer list under the op lock and does
+    all network fetches with the lock released; adoption re-acquires
+    the lock and proceeds only if nothing was appended locally during
+    the fetch (a longer peer chain never silently discards operations
+    that landed mid-sync).
   - unconditional local history discard on valid peer forks;
   - unbounded request body sizes on sync payloads;
   - telemetry metrics conflating adopted peer history with local

@@ -213,3 +213,44 @@ func TestCorruptNoncesRefusesStartup(t *testing.T) {
 		t.Fatal("corrupt nonces.json loaded without error")
 	}
 }
+
+// TestPeerURLValidation pins the registration contract {"url":
+// "http://host:port"}: sync appends "/ledger" to the string verbatim,
+// so only a bare http(s) base URL is accepted (issue #7).
+func TestPeerURLValidation(t *testing.T) {
+	valid := map[string]string{
+		"http://127.0.0.1:8080":   "http://127.0.0.1:8080",
+		"http://127.0.0.1:8080/":  "http://127.0.0.1:8080", // trailing slash canonicalized away
+		"https://peer.example:99": "https://peer.example:99",
+		"http://localhost:8081":   "http://localhost:8081",
+	}
+	for in, want := range valid {
+		got, err := validatePeerURL(in)
+		if err != nil {
+			t.Errorf("validatePeerURL(%q): rejected: %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("validatePeerURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	invalid := []string{
+		"",
+		"not a url",
+		"http://127.0.0.1:8080/internal-prefix", // the demonstrated SSRF vector: path prefix
+		"http://127.0.0.1:8080/ledger",          // any path at all
+		"http://127.0.0.1:8080/?q=1",            // query
+		"http://127.0.0.1:8080/#frag",           // fragment
+		"http://user:pass@127.0.0.1:8080/",      // userinfo
+		"ftp://127.0.0.1:8080/",                 // non-http(s) scheme
+		"gopher://127.0.0.1:70/",                // non-http(s) scheme
+		"file:///etc/passwd",                    // non-http(s) scheme
+		"http:///no-host",                       // missing host
+		"http://127.0.0.1:8080/%2e%2e/x",        // encoded path traversal still has a path
+	}
+	for _, in := range invalid {
+		if got, err := validatePeerURL(in); err == nil {
+			t.Errorf("validatePeerURL(%q): accepted as %q, want rejection", in, got)
+		}
+	}
+}
