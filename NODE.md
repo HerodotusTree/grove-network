@@ -154,9 +154,14 @@ with snapshot state (chain.json).
 - *Snapshot fallback:* if a journal contains only torn bytes, the node
   safely falls back to the existing snapshot state, zeroes the torn journal,
   and recovers without failing.
+- *Interrupted compaction:* journal entries already present in the snapshot
+  are skipped only when every field matches. Conflicting overlap is rejected.
 - *Corruption rejection:* non-tail corruption (e.g. malformed JSON in a
   middle record) causes the node to refuse startup with a corruption error
   rather than silently omitting history.
+- *Record boundaries:* malformed newline-terminated records are corruption,
+  including the final record. An unterminated tail is discarded even when
+  its JSON is complete, so the next append starts at a valid record boundary.
 - *Clean state initialization:* a missing chain path is treated as a clean
   first run (os.IsNotExist) and initializes a fresh ledger.
 - *Concurrency safety:* core storage operations pass Go race detection
@@ -167,7 +172,8 @@ with snapshot state (chain.json).
 Run the automated persistence test suite:
 
 ```
-go test -v -race ./ledger -run 'Test(SaveLoadRoundtrip|TornTail|CorruptMiddle|LoadMissing)'
+cd ledger
+go test -v -race -run 'Test(SaveLoadRoundtrip|TornTail|CorruptMiddle|LoadMissing|Recovery)'
 ```
 
 **Stated limits**

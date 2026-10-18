@@ -131,26 +131,35 @@ func (l *Ledger) replayJournal(jp string) error {
 	if err != nil {
 		return err
 	}
-	lines := bytes.Split(data, []byte{'\n'})
-	if n := len(lines); n > 0 && len(lines[n-1]) == 0 {
-		lines = lines[:n-1] // trailing newline, not an entry
-	}
+	// A completed journal record always ends in a newline. Only an
+	// unterminated tail can be a torn write; malformed completed records
+	// are corruption and must not be silently dropped.
+	completeEnd := bytes.LastIndexByte(data, '\n') + 1
+	lines := bytes.Split(data[:completeEnd], []byte{'\n'})
+	lines = lines[:len(lines)-1] // trailing separator, not an entry
+	snapshotLen := uint64(len(l.entries))
 	for i, line := range lines {
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
-			if i != len(lines)-1 {
-				return fmt.Errorf("load: journal line %d corrupt: %w", i, err)
+			return fmt.Errorf("load: journal line %d corrupt: %w", i, err)
+		}
+		// Compaction replaces the snapshot before truncating the journal.
+		// A process interruption between those writes leaves an overlap.
+		// Skip only records already in the loaded snapshot, and require an
+		// exact match so a conflicting history is never hidden.
+		if e.Index < snapshotLen {
+			if e != l.entries[e.Index] {
+				return fmt.Errorf("load: journal line %d conflicts with snapshot entry %d", i, e.Index)
 			}
-			// Torn final line: the crash happened mid-write.
-			// Truncate it; everything before it verified.
-			cut := bytes.LastIndex(data, []byte{'\n'})
-			if terr := os.Truncate(jp, int64(cut+1)); terr != nil {
-				return fmt.Errorf("load: torn journal tail, truncate failed: %w", terr)
-			}
-			break
+			continue
 		}
 		if err := l.appendVerified(e); err != nil {
 			return fmt.Errorf("load: journal line %d: %w", i, err)
+		}
+	}
+	if completeEnd < len(data) {
+		if err := os.Truncate(jp, int64(completeEnd)); err != nil {
+			return fmt.Errorf("load: torn journal tail, truncate failed: %w", err)
 		}
 	}
 	return nil
