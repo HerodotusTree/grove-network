@@ -180,3 +180,42 @@ func TestLoadMissingChainIsFreshStart(t *testing.T) {
 		t.Fatalf("want os.IsNotExist error for fresh start, got ledger=%v err=%v", got, err)
 	}
 }
+
+// TestCorruptFinalLineBrokenLinkRefuses: a final journal line that parses
+// as JSON but breaks the chain (wrong prev_hash — e.g. a torn write that
+// coincidentally parses, or a bit flip) is not a recoverable torn tail.
+// Load must refuse to start rather than truncate a line it cannot prove
+// is incomplete.
+func TestCorruptFinalLineBrokenLinkRefuses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chain.json")
+
+	l := New()
+	appendN(l, 3, "deposit")
+	if err := l.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	jp := filepath.Join(dir, "journal.jsonl")
+	lines := strings.Split(strings.TrimSuffix(readJournal(t, dir), "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 journal lines, got %d", len(lines))
+	}
+	// Final line: valid JSON, correct shape, but a prev_hash that does
+	// not link to entry 2.
+	lines[2] = `{"index":2,"timestamp":1,"payload":"forged","prev_hash":"deadbeef","hash":"ab12cd34"}`
+	if err := os.WriteFile(jp, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
+		t.Fatalf("write corrupt journal: %v", err)
+	}
+
+	got, err := Load(path)
+	if err == nil {
+		t.Fatalf("load accepted a link-broken final journal line; got %d entries, want refusal", got.Len())
+	}
+	if msg := err.Error(); !strings.Contains(msg, "prev_hash") && !strings.Contains(msg, "hash mismatch") {
+		t.Fatalf("want a hash/link integrity error, got: %v", err)
+	}
+}
+
+// TestLoadMissingChainIsFreshStart documents the contract in Load's
+// doc comment: nothing on disk yields an os.IsNotExist error.
