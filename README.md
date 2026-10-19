@@ -4,13 +4,13 @@
 
 *One box. One rule. Break it if you can.*
 
-The Grove is a network nobody owns and everybody can join. Download one program, allocate a little disk space, and your computer becomes a vault node: deposits in, 1:1 receipts out, redemptions honored always, a hash-chained ledger replicated across every machine so history can't be rewritten. The floor holds by arithmetic, not by anyone's promise.
+The Grove explores a distributed vault design: deposits in, 1:1 receipts out, redemptions recorded in a replicated ledger. This repository currently contains an experimental Go prototype using valueless trial accounting. The intended network guarantees are being developed and tested.
 
-This repository is the public home of the project as it gets built. Right now it holds the architecture, the trial design, and the specifications. The node software itself is being commissioned — builders welcome.
+This repository contains the architecture, trial specifications, and runnable node code. See [NODE.md](NODE.md) for the implemented interfaces and [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test expectations, and contribution guidance.
 
 ## The idea in one paragraph
 
-No new coin. People bring the digital assets they already hold; the network locks them 1:1 and issues receipts that circulate. Anyone can always redeem — "break the box" — and take the underlying value back. The 1:1 is a redemption guarantee, not a price peg. Volatility rages outside; the ratio holds inside. The network *is* the trial: participants, attackers, and witnesses all at once.
+The intended design introduces no new coin: people would bring existing digital assets, the network would lock them 1:1, and receipts would circulate and be redeemable for the underlying value. The proposed 1:1 guarantee concerns redemption rather than a market-price peg. Real-asset custody and these network guarantees remain outside the current trial prototype.
 
 ## Documents
 
@@ -25,12 +25,16 @@ No new coin. People bring the digital assets they already hold; the network lock
 
 ## Status
 
-Paper phase complete. The specs are written, the trial is designed, the emblem is drawn. What remains is physical-world work:
+The prototype implements signed HTTP operations, aggregate vault arithmetic,
+hash-chained storage with journal recovery, and peer sync. It is under active
+review and includes regression tests for unresolved security properties.
 
-1. Commission the node developer (spec is ready to hand over)
-2. Build the Hearth (build plan is ready)
-3. Independent code review, then public release
-4. Round 1 of the Vault Trial goes live
+Current work includes per-account receipt ownership, atomic operation and nonce
+persistence, replay protection across sync, and validation of authoritative peer
+history. See the [issue tracker](https://github.com/HerodotusTree/grove-network/issues)
+and the [test baseline](CONTRIBUTING.md#current-security-test-baseline) for the
+specific behaviors still being repaired. Trial accounting does not establish
+real-asset custody or production security.
 
 ## The graduation rule
 
