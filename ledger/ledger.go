@@ -42,6 +42,18 @@ func New() *Ledger { return &Ledger{} }
 
 // Append adds a payload as a new entry chained to the previous hash.
 func (l *Ledger) Append(payload string) Entry {
+	return l.appendEntry("", "", 0, payload, "")
+}
+
+// AppendSigned adds a fully identified entry: the network it belongs to
+// (domain), who authorized it (account), the signer's sequential nonce,
+// and the signature. Phase 1 entries are created this way so the ledger
+// itself preserves the evidence that replay verification needs.
+func (l *Ledger) AppendSigned(domain, account string, nonce uint64, payload, signature string) Entry {
+	return l.appendEntry(domain, account, nonce, payload, signature)
+}
+
+func (l *Ledger) appendEntry(domain, account string, nonce uint64, payload, signature string) Entry {
 	var prev string
 	if n := len(l.entries); n > 0 {
 		prev = l.entries[n-1].Hash
@@ -49,7 +61,11 @@ func (l *Ledger) Append(payload string) Entry {
 	e := Entry{
 		Index:     uint64(len(l.entries)),
 		Timestamp: time.Now().Unix(),
+		Domain:    domain,
+		Account:   account,
+		Nonce:     nonce,
 		Payload:   payload,
+		Signature: signature,
 		PrevHash:  prev,
 	}
 	e.Hash = e.computeHash()
