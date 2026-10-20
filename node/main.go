@@ -120,16 +120,14 @@ func (s *server) applyGenesis(payload string) error {
 	return nil
 }
 
-// rebuildState replays the last recorded operation to restore R and C.
+// rebuildState restores the vault by replaying the whole ledger from
+// genesis (vault.Rebuild): per-account balances and R/C/Floor are
+// derived from the authenticated entries, and a chain whose recorded
+// numbers do not recompute refuses to start. The v0.3 shortcut -
+// trusting the last entry's recorded state - is gone: it let a single
+// forged entry rewrite the vault's reality.
 func (s *server) rebuildState(v *vault.Vault) error {
-	if n := v.Log.Len(); n > 0 {
-		var op vault.Op
-		if err := json.Unmarshal([]byte(v.Log.Entries()[n-1].Payload), &op); err != nil {
-			return fmt.Errorf("replay: %w", err)
-		}
-		v.R, v.C, v.Floor = op.R, op.C, op.Floor
-	}
-	return nil
+	return v.Rebuild()
 }
 
 // signedReq is the shape of every mutating request. The account is the
