@@ -24,6 +24,9 @@ func testDomain() string {
 }
 
 func newTestServer(t *testing.T) *server {
+	return newTestServerGenesis(t, testGenesis)
+}
+func newTestServerGenesis(t *testing.T, genesis string) *server {
 	t.Helper()
 	dir := t.TempDir()
 	s := &server{
@@ -32,7 +35,7 @@ func newTestServer(t *testing.T) *server {
 		dataDir:   dir,
 		chainPath: dir + "/chain.json",
 	}
-	if err := s.applyGenesis(testGenesis); err != nil {
+	if err := s.applyGenesis(genesis); err != nil {
 		t.Fatalf("test genesis: %v", err)
 	}
 	return s

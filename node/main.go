@@ -496,7 +496,9 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	peers := append([]string(nil), s.peers...)
-	localLen := s.v.Log.Len()
+	localEntries := s.v.Log.Entries()
+	localLen := len(localEntries)
+	domain := s.v.Domain
 	s.mu.Unlock()
 
 	// The op lock is released from here until adoption. No code path
@@ -526,6 +528,22 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		if err := ledger.VerifyEntries(entries); err != nil {
 			continue
 		}
+		// Phase 1 adoption gate (rulings 9 + 14): ADOPTABLE is a
+		// subset of BOOTABLE. The candidate must belong to this
+		// network (CheckDomain), must extend our own history
+		// without rewriting it (prefix extension), and must replay
+		// cleanly through the full transition rules on a scratch
+		// vault (Rebuild) - all before it comes near the live chain.
+		if err := ledger.CheckDomain(entries, domain); err != nil {
+			continue
+		}
+		if !ledger.IsPrefixExtension(localEntries, entries) {
+			continue
+		}
+		scratch := vault.New(ledger.FromEntries(entries))
+		if err := scratch.Rebuild(); err != nil {
+			continue
+		}
 		best = entries
 		bestFrom = peer
 	}
@@ -542,6 +560,7 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.deriveNonces()
 		if !s.persist(w) {
 			return
 		}

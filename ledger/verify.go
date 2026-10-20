@@ -42,3 +42,28 @@ func (l *Ledger) Adopt(entries []Entry, path string) error {
 	}
 	return f.Close()
 }
+
+// FromEntries returns a ledger holding the given entries without
+// adopting them - used to stage-verify a candidate chain (replay it
+// through a scratch vault) before any swap is allowed.
+func FromEntries(entries []Entry) *Ledger {
+	return &Ledger{entries: append([]Entry(nil), entries...)}
+}
+
+// IsPrefixExtension reports whether candidate begins with every local
+// entry, hash for hash, and continues past them. The entry hash covers
+// every committed field (H12), so equal hashes mean identical entries.
+// Phase 1 adoption accepts only prefix extensions: a node's
+// acknowledged history is never rewritten by sync. True forks are
+// Phase 2.
+func IsPrefixExtension(local, candidate []Entry) bool {
+	if len(candidate) <= len(local) {
+		return false
+	}
+	for i, e := range local {
+		if candidate[i].Hash != e.Hash {
+			return false
+		}
+	}
+	return true
+}
