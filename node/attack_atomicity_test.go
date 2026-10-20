@@ -1,54 +1,49 @@
 package main
 
 // Independent attacker pass #2 (Claude), 2026-10-17 — atomicity angle.
-// Failing-as-intended on v0.3. Test assets only.
+// Phase 1 step 8 (ATOM-01): the nonce file this attack used to sabotage
+// no longer exists. Nonce state is derived from the ledger alone, so
+// the split-write gap has nowhere to live. The attack is re-aimed at
+// the new design: deposit, restart with the chain as the only truth,
+// replay the exact same signed bytes - they must not apply twice.
 
 import (
 	"net/http"
-	"os"
 	"testing"
 
 	"github.com/HerodotusTree/grove-network/identity"
 )
 
-// C1. Chain and nonce are two separate writes. If the nonce write fails
-// after the chain write succeeds, the client is told 500 (failure) but
-// the money already moved and is durable. After a restart the nonce on
-// disk is stale, so the SAME signed bytes are accepted again: one
-// signature, two deposits.
+// C1 (re-aimed). One signature, one deposit - across a restart.
 func TestAttack_SplitWriteDoubleApplyAfterRestart(t *testing.T) {
 	s := newTestServer(t)
-	// Make the nonce write fail: a directory where the temp file goes.
-	if err := os.Mkdir(s.noncePath+".tmp", 0700); err != nil {
-		t.Fatal(err)
-	}
 	priv, pub, _ := identity.Generate()
 	body := signReq(t, identity.OpDeposit, priv, pub, 100, 1)
 
 	rec := postDeposit(s, body)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("setup: expected nonce-write failure (500), got %d", rec.Code)
-	}
-	if s.v.R == 100 {
-		t.Logf("client was told 500, but the deposit is in the chain (R=%d)", s.v.R)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup: deposit should succeed, got %d", rec.Code)
 	}
 
 	// Restart: fresh server, same data dir, disk is the only truth.
-	os.Remove(s.noncePath + ".tmp")
-	s2 := &server{dataDir: s.dataDir, chainPath: s.chainPath, noncePath: s.noncePath}
+	s2 := &server{dataDir: s.dataDir, chainPath: s.chainPath}
 	v, err := s2.loadOrNew()
 	if err != nil {
 		t.Fatalf("restart: %v", err)
 	}
 	s2.v = v
-	if s2.nonces, err = loadNonces(s2.noncePath); err != nil {
-		t.Fatalf("restart nonces: %v", err)
+	if err := s2.applyGenesis(testGenesis); err != nil {
+		t.Fatalf("restart genesis: %v", err)
 	}
+	s2.deriveNonces()
 
 	// Replay the exact same signed bytes.
 	rec = postDeposit(s2, body)
 	if rec.Code == http.StatusOK {
 		t.Fatalf("DOUBLE APPLY: one signature produced two deposits across a restart (R=%d, ledger entries=%d)",
 			s2.v.R, s2.v.Log.Len())
+	}
+	if s2.v.R != 100 {
+		t.Fatalf("replay mutated the vault: R=%d, want 100", s2.v.R)
 	}
 }

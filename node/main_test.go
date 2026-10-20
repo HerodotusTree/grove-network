@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/HerodotusTree/grove-network/identity"
@@ -32,7 +31,6 @@ func newTestServer(t *testing.T) *server {
 		nonces:    map[string]uint64{},
 		dataDir:   dir,
 		chainPath: dir + "/chain.json",
-		noncePath: dir + "/nonces.json",
 	}
 	if err := s.applyGenesis(testGenesis); err != nil {
 		t.Fatalf("test genesis: %v", err)
@@ -200,32 +198,27 @@ func TestNoncesPersistAcrossRestart(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deposit: %d", rec.Code)
 	}
-	// Simulate a restart: fresh server, same data dir.
-	s2 := &server{
-		v:         vault.New(ledger.New()),
-		dataDir:   s.dataDir,
-		chainPath: s.chainPath,
-		noncePath: s.noncePath,
-	}
-	nonces, err := loadNonces(s2.noncePath)
+	// Simulate a restart: fresh server, same data dir. Nonce state is
+	// rebuilt from the ledger alone - there is no nonce file anymore.
+	s2 := &server{dataDir: s.dataDir, chainPath: s.chainPath}
+	v, err := s2.loadOrNew()
 	if err != nil {
-		t.Fatalf("load nonces: %v", err)
+		t.Fatalf("reload chain: %v", err)
 	}
-	s2.nonces = nonces
+	s2.v = v
+	if err := s2.applyGenesis(testGenesis); err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+	s2.deriveNonces()
 	// The old nonce must still be rejected after restart.
 	rec = postDeposit(s2, signReq(t, identity.OpDeposit, priv, pub, 100, 1))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("replay after restart: got %d, want 401", rec.Code)
 	}
-}
-
-func TestCorruptNoncesRefusesStartup(t *testing.T) {
-	s := newTestServer(t)
-	if err := os.WriteFile(s.noncePath, []byte("{not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadNonces(s.noncePath); err == nil {
-		t.Fatal("corrupt nonces.json loaded without error")
+	// And the next nonce must work: the rebuilt table is exact.
+	rec = postDeposit(s2, signReq(t, identity.OpDeposit, priv, pub, 50, 2))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("next nonce after restart: got %d, body %s", rec.Code, rec.Body.String())
 	}
 }
 

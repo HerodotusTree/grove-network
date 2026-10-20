@@ -62,7 +62,6 @@ type server struct {
 	peers     []string
 	dataDir   string
 	chainPath string
-	noncePath string
 	// nonces tracks the last accepted nonce per account. A new account
 	// starts at 0, so its first operation must carry nonce 1. Nonces are
 	// the replay defense: a signed request is only good once.
@@ -174,39 +173,17 @@ func (s *server) persist(w http.ResponseWriter) bool {
 	return true
 }
 
-// loadNonces reads the per-account nonce table. A missing file means no
-// account has ever acted — start empty. A corrupt file refuses startup:
-// running with a forged or truncated nonce table would reopen replays.
-func loadNonces(path string) (map[string]uint64, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return map[string]uint64{}, nil
+// deriveNonces rebuilds the nonce table from the ledger: every entry
+// carries its account and nonce, so the last entry per account sets
+// the table. The ledger is the only durable authorization record -
+// there is no nonce file (ATOM-01).
+func (s *server) deriveNonces() {
+	s.nonces = map[string]uint64{}
+	for _, e := range s.v.Log.Entries() {
+		if e.Account != "" {
+			s.nonces[e.Account] = e.Nonce
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	var nonces map[string]uint64
-	if err := json.Unmarshal(data, &nonces); err != nil {
-		return nil, fmt.Errorf("nonces: corrupt file: %w", err)
-	}
-	if nonces == nil {
-		nonces = map[string]uint64{}
-	}
-	return nonces, nil
-}
-
-// saveNonces writes the nonce table atomically (temp file + rename) so a
-// crash mid-write can never leave a half-written table behind.
-func (s *server) saveNonces() error {
-	data, err := json.Marshal(s.nonces)
-	if err != nil {
-		return err
-	}
-	tmp := s.noncePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.noncePath)
 }
 
 // checkAuth verifies that req is a fresh, properly signed operation from
@@ -235,19 +212,13 @@ func (s *server) authReject(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 }
 
-// commitNonce advances the account's nonce after a fully accepted and
-// persisted operation, and saves the table. The in-memory bump happens
-// before the disk write: if the write fails we answer 500 and the
-// client must retry with a fresh nonce rather than replaying this one.
-// (A disk failure between the chain write and the nonce write can still
-// leave a stale table on restart — same crash-consistency caveat as the
-// vault's own mutate-then-persist.)
+// commitNonce advances the account's nonce cache after a fully
+// accepted and persisted operation. The cache is not the record: the
+// ledger entry itself carries the nonce, and startup rebuilds the
+// cache from the chain (deriveNonces). There is no second write, so
+// chain and nonce state can never disagree on disk (ATOM-01).
 func (s *server) commitNonce(w http.ResponseWriter, account string, nonce uint64) bool {
 	s.nonces[account] = nonce
-	if err := s.saveNonces(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "nonce persist failed: " + err.Error()})
-		return false
-	}
 	return true
 }
 
@@ -619,7 +590,6 @@ func main() {
 		started:   time.Now(),
 		dataDir:   *data,
 		chainPath: *data + "/chain.json",
-		noncePath: *data + "/nonces.json",
 		port:      *port,
 	}
 	v, err := s.loadOrNew()
@@ -627,14 +597,10 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	s.v = v
-	nonces, err := loadNonces(s.noncePath)
-	if err != nil {
-		log.Fatalf("refusing to start: %v", err)
-	}
-	s.nonces = nonces
 	if err := s.applyGenesis(genesisPayload); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
+	s.deriveNonces()
 	s.m.StartedAt = s.started
 
 	http.HandleFunc("/deposit", s.handleDeposit)
