@@ -31,6 +31,9 @@ type Vault struct {
 	C     int64
 	Floor int64
 	Log   *ledger.Ledger
+	// Domain is the network's genesis hash, stamped into every entry
+	// this vault records. The node sets it from its genesis config.
+	Domain string
 }
 
 // New returns a vault wired to the given ledger.
@@ -39,14 +42,22 @@ func New(log *ledger.Ledger) *Vault { return &Vault{Log: log} }
 // Surplus returns S = R - C.
 func (v *Vault) Surplus() int64 { return v.R - v.C }
 
-func (v *Vault) record(kind string, amount int64) {
+func (v *Vault) record(kind string, amount int64, account string, nonce uint64, sig string) {
 	rec, _ := json.Marshal(Op{Kind: kind, Amount: amount, R: v.R, C: v.C, Floor: v.Floor})
-	v.Log.Append(string(rec))
+	v.Log.AppendSigned(v.Domain, account, nonce, string(rec), sig)
 }
 
 // Deposit adds reserves and mints an equal claim. S is unchanged.
 // Intake is closed while impaired (R < C).
+// Deposit is the legacy amount-only form, kept until the node migrates
+// to DepositFor; it records an empty authorization envelope.
 func (v *Vault) Deposit(amount int64) error {
+	return v.DepositFor("", 0, "", amount)
+}
+
+// DepositFor is Deposit carrying its authorization envelope (account,
+// nonce, signature), recorded in the ledger entry itself.
+func (v *Vault) DepositFor(account string, nonce uint64, sig string, amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("deposit: amount must be positive")
 	}
@@ -58,7 +69,7 @@ func (v *Vault) Deposit(amount int64) error {
 	}
 	v.R += amount
 	v.C += amount
-	v.record("deposit", amount)
+	v.record("deposit", amount, account, nonce, sig)
 	return nil
 }
 
@@ -66,7 +77,13 @@ func (v *Vault) Deposit(amount int64) error {
 // non-redeemable floor ledger, minting no claims. S grows by amount.
 // Tips are how the floor ratchets up; without them it holds flat,
 // never down.
+// Tip is the legacy amount-only form; see Deposit.
 func (v *Vault) Tip(amount int64) error {
+	return v.TipFor("", 0, "", amount)
+}
+
+// TipFor is Tip carrying its authorization envelope.
+func (v *Vault) TipFor(account string, nonce uint64, sig string, amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("tip: amount must be positive")
 	}
@@ -75,7 +92,7 @@ func (v *Vault) Tip(amount int64) error {
 	}
 	v.R += amount
 	v.Floor += amount
-	v.record("tip", amount)
+	v.record("tip", amount, account, nonce, sig)
 	return nil
 }
 
@@ -91,7 +108,13 @@ func mulDiv(a, b, c int64) int64 {
 
 // Redeem burns claims and pays out reserves 1:1 while healthy.
 // While impaired (R < C) it pays pro-rata at R/C.
+// Redeem is the legacy amount-only form; see Deposit.
 func (v *Vault) Redeem(amount int64) (int64, error) {
+	return v.RedeemFor("", 0, "", amount)
+}
+
+// RedeemFor is Redeem carrying its authorization envelope.
+func (v *Vault) RedeemFor(account string, nonce uint64, sig string, amount int64) (int64, error) {
 	if amount <= 0 {
 		return 0, fmt.Errorf("redeem: amount must be positive")
 	}
@@ -111,6 +134,6 @@ func (v *Vault) Redeem(amount int64) (int64, error) {
 		v.R += payout
 		return 0, fmt.Errorf("redeem: rejected, would reduce surplus")
 	}
-	v.record("redeem", amount)
+	v.record("redeem", amount, account, nonce, sig)
 	return payout, nil
 }
