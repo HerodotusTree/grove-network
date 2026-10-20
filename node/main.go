@@ -67,6 +67,12 @@ type server struct {
 	// the replay defense: a signed request is only good once.
 	nonces map[string]uint64
 	port   string
+	// role is "sequencer" (the one writer) or "follower" (read-only,
+	// pulls only from the sequencer). Empty means sequencer: the
+	// single-node trial default. Set from -role in main.
+	role string
+	// sequencerURL is a follower's configured pull source (-sequencer).
+	sequencerURL string
 }
 
 func (s *server) chainFile() string { return s.chainPath }
@@ -107,6 +113,14 @@ func (s *server) applyGenesis(payload string) error {
 	}
 	domain := g.Hash
 	if s.v.Log.Len() == 0 {
+		if s.role == "follower" {
+			// Followers never create a genesis (P5): entry 0 is
+			// adopted from the sequencer. Until then the node is
+			// "awaiting entry 0" - domain known from the config
+			// file, chain empty, writes refused by role (N5).
+			s.v.Domain = domain
+			return nil
+		}
 		if _, err := s.v.Log.AppendGenesis(payload); err != nil {
 			return err
 		}
@@ -228,7 +242,21 @@ func (s *server) checkInvariant(before int64) {
 	}
 }
 
+// acceptWrites enforces the sequencer role (N1): exactly one node
+// writes. Followers refuse every mutating operation - their chain
+// changes only by adopting the sequencer's history through /sync.
+func (s *server) acceptWrites(w http.ResponseWriter) bool {
+	if s.role == "follower" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "follower nodes are read-only; writes go to the sequencer"})
+		return false
+	}
+	return true
+}
+
 func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -263,6 +291,9 @@ func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -300,6 +331,9 @@ func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTip(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -496,6 +530,11 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	peers := append([]string(nil), s.peers...)
+	if s.role == "follower" {
+		// Followers pull only from the configured sequencer (N1):
+		// peer registrations mean nothing to them.
+		peers = []string{s.sequencerURL}
+	}
 	localEntries := s.v.Log.Entries()
 	localLen := len(localEntries)
 	domain := s.v.Domain
@@ -609,6 +648,8 @@ func main() {
 	data := flag.String("data", "grove-data", "data directory")
 	keygen := flag.Bool("keygen", false, "generate an Ed25519 keypair and exit")
 	genesis := flag.String("genesis", "", "path to the genesis config file (required)")
+	role := flag.String("role", "sequencer", "node role: sequencer (the one writer) or follower (read-only)")
+	sequencer := flag.String("sequencer", "", "follower only: base URL of the sequencer to pull from")
 	flag.Parse()
 
 	if *keygen {
@@ -627,6 +668,12 @@ func main() {
 	if *genesis == "" {
 		log.Fatalf("refusing to start: -genesis <file> is required; a Phase 1 node has no default network")
 	}
+	if *role != "sequencer" && *role != "follower" {
+		log.Fatalf("refusing to start: -role must be sequencer or follower, got %q", *role)
+	}
+	if *role == "follower" && *sequencer == "" {
+		log.Fatalf("refusing to start: follower role requires -sequencer <url>, its only pull source")
+	}
 	rawGenesis, err := os.ReadFile(*genesis)
 	if err != nil {
 		log.Fatalf("refusing to start: read genesis: %v", err)
@@ -634,10 +681,12 @@ func main() {
 	genesisPayload := strings.TrimSpace(string(rawGenesis))
 
 	s := &server{
-		started:   time.Now(),
-		dataDir:   *data,
-		chainPath: *data + "/chain.json",
-		port:      *port,
+		started:      time.Now(),
+		dataDir:      *data,
+		chainPath:    *data + "/chain.json",
+		port:         *port,
+		role:         *role,
+		sequencerURL: *sequencer,
 	}
 	v, err := s.loadOrNew()
 	if err != nil {
