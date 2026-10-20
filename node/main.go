@@ -574,6 +574,36 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStatus serves STATUS-01: a read-only, informational view of
+// one account - its balance and consumed nonce - plus the node's
+// current canonical ledger position (height and tip hash). It
+// authorizes nothing; it only reports what the ledger proves.
+func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter required"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tip := ""
+	if n := s.v.Log.Len(); n > 0 {
+		tip = s.v.Log.Entries()[n-1].Hash
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account": account,
+		"balance": s.v.Balances[account],
+		"nonce":   s.nonces[account],
+		"height":  s.v.Log.Len(),
+		"tip":     tip,
+		"domain":  s.v.Domain,
+	})
+}
+
 func main() {
 	port := flag.String("port", "8080", "listen port")
 	data := flag.String("data", "grove-data", "data directory")
@@ -624,6 +654,7 @@ func main() {
 	http.HandleFunc("/redeem", s.handleRedeem)
 	http.HandleFunc("/tip", s.handleTip)
 	http.HandleFunc("/state", s.handleState)
+	http.HandleFunc("/status", s.handleStatus)
 	http.HandleFunc("/ledger", s.handleLedger)
 	http.HandleFunc("/metrics", s.handleMetrics)
 	http.HandleFunc("/peers", s.handlePeers)
