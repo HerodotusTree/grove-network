@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +91,34 @@ func (s *server) loadOrNew() (*vault.Vault, error) {
 		return nil, err
 	}
 	return v, nil
+}
+
+// applyGenesis binds the node to its network. The genesis payload
+// comes from the operator's genesis config file (ruling 2: genesis
+// config is a file). On a fresh chain it writes entry 0; on an
+// existing chain it requires the chain to belong to the configured
+// genesis (CheckDomain) - a chain with the wrong genesis file refuses
+// to start (A3). The vault stamps the resulting domain into every
+// entry it records.
+func (s *server) applyGenesis(payload string) error {
+	probe := ledger.New()
+	g, err := probe.AppendGenesis(payload)
+	if err != nil {
+		return err
+	}
+	domain := g.Hash
+	if s.v.Log.Len() == 0 {
+		if _, err := s.v.Log.AppendGenesis(payload); err != nil {
+			return err
+		}
+		s.v.Domain = domain
+		return s.v.Log.Save(s.chainPath)
+	}
+	if err := ledger.CheckDomain(s.v.Log.Entries(), domain); err != nil {
+		return err
+	}
+	s.v.Domain = domain
+	return nil
 }
 
 // rebuildState replays the last recorded operation to restore R and C.
@@ -560,6 +589,7 @@ func main() {
 	port := flag.String("port", "8080", "listen port")
 	data := flag.String("data", "grove-data", "data directory")
 	keygen := flag.Bool("keygen", false, "generate an Ed25519 keypair and exit")
+	genesis := flag.String("genesis", "", "path to the genesis config file (required)")
 	flag.Parse()
 
 	if *keygen {
@@ -574,6 +604,15 @@ func main() {
 		fmt.Println(string(out))
 		return
 	}
+
+	if *genesis == "" {
+		log.Fatalf("refusing to start: -genesis <file> is required; a Phase 1 node has no default network")
+	}
+	rawGenesis, err := os.ReadFile(*genesis)
+	if err != nil {
+		log.Fatalf("refusing to start: read genesis: %v", err)
+	}
+	genesisPayload := strings.TrimSpace(string(rawGenesis))
 
 	s := &server{
 		started:   time.Now(),
@@ -592,6 +631,9 @@ func main() {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	s.nonces = nonces
+	if err := s.applyGenesis(genesisPayload); err != nil {
+		log.Fatalf("refusing to start: %v", err)
+	}
 	s.m.StartedAt = s.started
 
 	http.HandleFunc("/deposit", s.handleDeposit)
