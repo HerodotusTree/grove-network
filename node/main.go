@@ -135,8 +135,9 @@ func (s *server) rebuildState(v *vault.Vault) error {
 
 // signedReq is the shape of every mutating request. The account is the
 // hex Ed25519 public key; the signature covers the canonical payload
-// grove-v1|<op>|<account>|<amount>|<nonce> so a signature can never be
-// moved to a different op, amount, account, or replayed nonce.
+// grove-v2|<domain>|<op>|<account>|<amount>|<nonce> so a signature can
+// never be moved to a different op, amount, account, replayed nonce,
+// or network.
 type signedReq struct {
 	Account   string `json:"account"`
 	Amount    int64  `json:"amount"`
@@ -219,7 +220,7 @@ func (s *server) checkAuth(op string, req signedReq) error {
 	if req.Nonce != last+1 {
 		return fmt.Errorf("bad nonce: want %d, got %d", last+1, req.Nonce)
 	}
-	payload := identity.Payload(op, req.Account, req.Amount, req.Nonce)
+	payload := identity.PayloadFor(s.v.Domain, op, req.Account, req.Amount, req.Nonce)
 	if !identity.Verify(req.Account, payload, req.Signature) {
 		return fmt.Errorf("bad signature")
 	}
@@ -276,7 +277,7 @@ func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	if err := s.v.Deposit(req.Amount); err != nil {
+	if err := s.v.DepositFor(req.Account, req.Nonce, req.Signature, req.Amount); err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -310,7 +311,7 @@ func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	payout, err := s.v.Redeem(req.Amount)
+	payout, err := s.v.RedeemFor(req.Account, req.Nonce, req.Signature, req.Amount)
 	if err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -347,7 +348,7 @@ func (s *server) handleTip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	if err := s.v.Tip(req.Amount); err != nil {
+	if err := s.v.TipFor(req.Account, req.Nonce, req.Signature, req.Amount); err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
