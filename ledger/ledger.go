@@ -1,4 +1,3 @@
-
 // Package ledger implements the Grove's append-only hash-chained log.
 // Every entry commits to the hash of the entry before it, so any
 // tampering with history breaks the chain and is detectable.
@@ -16,20 +15,25 @@ import (
 type Entry struct {
 	Index     uint64 `json:"index"`
 	Timestamp int64  `json:"timestamp"` // unix seconds; informational only
+	Domain    string `json:"domain"`    // genesis hash this entry belongs to (empty only for the genesis entry)
+	Account   string `json:"account"`   // signer's Ed25519 public key, hex
+	Nonce     uint64 `json:"nonce"`     // signer's sequential nonce
 	Payload   string `json:"payload"`
+	Signature string `json:"signature"` // Ed25519 signature over the canonical payload, hex
 	PrevHash  string `json:"prev_hash"`
 	Hash      string `json:"hash"`
 }
 
 func (e *Entry) computeHash() string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%d|%d|%s|%s", e.Index, e.Timestamp, e.Payload, e.PrevHash)
+	// The hash covers every committed field EXCEPT the entry's own Hash field.
+	fmt.Fprintf(h, "%d|%d|%s|%s|%d|%s|%s|%s", e.Index, e.Timestamp, e.Domain, e.Account, e.Nonce, e.Payload, e.Signature, e.PrevHash)
 	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Ledger is an in-memory hash-chained log.
 type Ledger struct {
-	entries []Entry
+	entries   []Entry
 	journaled uint64 // leading entries already durable (snapshot or journal)
 }
 
@@ -80,4 +84,3 @@ func (l *Ledger) Entries() []Entry { return append([]Entry(nil), l.entries...) }
 
 // Dump serializes the chain to JSON.
 func (l *Ledger) Dump() ([]byte, error) { return json.MarshalIndent(l.entries, "", "  ") }
-
