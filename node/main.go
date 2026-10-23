@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -61,12 +62,17 @@ type server struct {
 	peers     []string
 	dataDir   string
 	chainPath string
-	noncePath string
 	// nonces tracks the last accepted nonce per account. A new account
 	// starts at 0, so its first operation must carry nonce 1. Nonces are
 	// the replay defense: a signed request is only good once.
 	nonces map[string]uint64
 	port   string
+	// role is "sequencer" (the one writer) or "follower" (read-only,
+	// pulls only from the sequencer). Empty means sequencer: the
+	// single-node trial default. Set from -role in main.
+	role string
+	// sequencerURL is a follower's configured pull source (-sequencer).
+	sequencerURL string
 }
 
 func (s *server) chainFile() string { return s.chainPath }
@@ -92,22 +98,57 @@ func (s *server) loadOrNew() (*vault.Vault, error) {
 	return v, nil
 }
 
-// rebuildState replays the last recorded operation to restore R and C.
-func (s *server) rebuildState(v *vault.Vault) error {
-	if n := v.Log.Len(); n > 0 {
-		var op vault.Op
-		if err := json.Unmarshal([]byte(v.Log.Entries()[n-1].Payload), &op); err != nil {
-			return fmt.Errorf("replay: %w", err)
-		}
-		v.R, v.C, v.Floor = op.R, op.C, op.Floor
+// applyGenesis binds the node to its network. The genesis payload
+// comes from the operator's genesis config file (ruling 2: genesis
+// config is a file). On a fresh chain it writes entry 0; on an
+// existing chain it requires the chain to belong to the configured
+// genesis (CheckDomain) - a chain with the wrong genesis file refuses
+// to start (A3). The vault stamps the resulting domain into every
+// entry it records.
+func (s *server) applyGenesis(payload string) error {
+	probe := ledger.New()
+	g, err := probe.AppendGenesis(payload)
+	if err != nil {
+		return err
 	}
+	domain := g.Hash
+	if s.v.Log.Len() == 0 {
+		if s.role == "follower" {
+			// Followers never create a genesis (P5): entry 0 is
+			// adopted from the sequencer. Until then the node is
+			// "awaiting entry 0" - domain known from the config
+			// file, chain empty, writes refused by role (N5).
+			s.v.Domain = domain
+			return nil
+		}
+		if _, err := s.v.Log.AppendGenesis(payload); err != nil {
+			return err
+		}
+		s.v.Domain = domain
+		return s.v.Log.Save(s.chainPath)
+	}
+	if err := ledger.CheckDomain(s.v.Log.Entries(), domain); err != nil {
+		return err
+	}
+	s.v.Domain = domain
 	return nil
+}
+
+// rebuildState restores the vault by replaying the whole ledger from
+// genesis (vault.Rebuild): per-account balances and R/C/Floor are
+// derived from the authenticated entries, and a chain whose recorded
+// numbers do not recompute refuses to start. The v0.3 shortcut -
+// trusting the last entry's recorded state - is gone: it let a single
+// forged entry rewrite the vault's reality.
+func (s *server) rebuildState(v *vault.Vault) error {
+	return v.Rebuild()
 }
 
 // signedReq is the shape of every mutating request. The account is the
 // hex Ed25519 public key; the signature covers the canonical payload
-// grove-v1|<op>|<account>|<amount>|<nonce> so a signature can never be
-// moved to a different op, amount, account, or replayed nonce.
+// grove-v2|<domain>|<op>|<account>|<amount>|<nonce> so a signature can
+// never be moved to a different op, amount, account, replayed nonce,
+// or network.
 type signedReq struct {
 	Account   string `json:"account"`
 	Amount    int64  `json:"amount"`
@@ -144,39 +185,17 @@ func (s *server) persist(w http.ResponseWriter) bool {
 	return true
 }
 
-// loadNonces reads the per-account nonce table. A missing file means no
-// account has ever acted — start empty. A corrupt file refuses startup:
-// running with a forged or truncated nonce table would reopen replays.
-func loadNonces(path string) (map[string]uint64, error) {
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return map[string]uint64{}, nil
+// deriveNonces rebuilds the nonce table from the ledger: every entry
+// carries its account and nonce, so the last entry per account sets
+// the table. The ledger is the only durable authorization record -
+// there is no nonce file (ATOM-01).
+func (s *server) deriveNonces() {
+	s.nonces = map[string]uint64{}
+	for _, e := range s.v.Log.Entries() {
+		if e.Account != "" {
+			s.nonces[e.Account] = e.Nonce
+		}
 	}
-	if err != nil {
-		return nil, err
-	}
-	var nonces map[string]uint64
-	if err := json.Unmarshal(data, &nonces); err != nil {
-		return nil, fmt.Errorf("nonces: corrupt file: %w", err)
-	}
-	if nonces == nil {
-		nonces = map[string]uint64{}
-	}
-	return nonces, nil
-}
-
-// saveNonces writes the nonce table atomically (temp file + rename) so a
-// crash mid-write can never leave a half-written table behind.
-func (s *server) saveNonces() error {
-	data, err := json.Marshal(s.nonces)
-	if err != nil {
-		return err
-	}
-	tmp := s.noncePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.noncePath)
 }
 
 // checkAuth verifies that req is a fresh, properly signed operation from
@@ -190,7 +209,7 @@ func (s *server) checkAuth(op string, req signedReq) error {
 	if req.Nonce != last+1 {
 		return fmt.Errorf("bad nonce: want %d, got %d", last+1, req.Nonce)
 	}
-	payload := identity.Payload(op, req.Account, req.Amount, req.Nonce)
+	payload := identity.PayloadFor(s.v.Domain, op, req.Account, req.Amount, req.Nonce)
 	if !identity.Verify(req.Account, payload, req.Signature) {
 		return fmt.Errorf("bad signature")
 	}
@@ -205,19 +224,13 @@ func (s *server) authReject(w http.ResponseWriter, err error) {
 	writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
 }
 
-// commitNonce advances the account's nonce after a fully accepted and
-// persisted operation, and saves the table. The in-memory bump happens
-// before the disk write: if the write fails we answer 500 and the
-// client must retry with a fresh nonce rather than replaying this one.
-// (A disk failure between the chain write and the nonce write can still
-// leave a stale table on restart — same crash-consistency caveat as the
-// vault's own mutate-then-persist.)
+// commitNonce advances the account's nonce cache after a fully
+// accepted and persisted operation. The cache is not the record: the
+// ledger entry itself carries the nonce, and startup rebuilds the
+// cache from the chain (deriveNonces). There is no second write, so
+// chain and nonce state can never disagree on disk (ATOM-01).
 func (s *server) commitNonce(w http.ResponseWriter, account string, nonce uint64) bool {
 	s.nonces[account] = nonce
-	if err := s.saveNonces(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "nonce persist failed: " + err.Error()})
-		return false
-	}
 	return true
 }
 
@@ -229,7 +242,21 @@ func (s *server) checkInvariant(before int64) {
 	}
 }
 
+// acceptWrites enforces the sequencer role (N1): exactly one node
+// writes. Followers refuse every mutating operation - their chain
+// changes only by adopting the sequencer's history through /sync.
+func (s *server) acceptWrites(w http.ResponseWriter) bool {
+	if s.role == "follower" {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "follower nodes are read-only; writes go to the sequencer"})
+		return false
+	}
+	return true
+}
+
 func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -247,7 +274,7 @@ func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	if err := s.v.Deposit(req.Amount); err != nil {
+	if err := s.v.DepositFor(req.Account, req.Nonce, req.Signature, req.Amount); err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -264,6 +291,9 @@ func (s *server) handleDeposit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -281,7 +311,7 @@ func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	payout, err := s.v.Redeem(req.Amount)
+	payout, err := s.v.RedeemFor(req.Account, req.Nonce, req.Signature, req.Amount)
 	if err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
@@ -301,6 +331,9 @@ func (s *server) handleRedeem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) handleTip(w http.ResponseWriter, r *http.Request) {
+	if !s.acceptWrites(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
@@ -318,7 +351,7 @@ func (s *server) handleTip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before := s.v.Surplus()
-	if err := s.v.Tip(req.Amount); err != nil {
+	if err := s.v.TipFor(req.Account, req.Nonce, req.Signature, req.Amount); err != nil {
 		s.m.OpsRejected++
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 		return
@@ -497,7 +530,14 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	peers := append([]string(nil), s.peers...)
-	localLen := s.v.Log.Len()
+	if s.role == "follower" {
+		// Followers pull only from the configured sequencer (N1):
+		// peer registrations mean nothing to them.
+		peers = []string{s.sequencerURL}
+	}
+	localEntries := s.v.Log.Entries()
+	localLen := len(localEntries)
+	domain := s.v.Domain
 	s.mu.Unlock()
 
 	// The op lock is released from here until adoption. No code path
@@ -527,6 +567,22 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		if err := ledger.VerifyEntries(entries); err != nil {
 			continue
 		}
+		// Phase 1 adoption gate (rulings 9 + 14): ADOPTABLE is a
+		// subset of BOOTABLE. The candidate must belong to this
+		// network (CheckDomain), must extend our own history
+		// without rewriting it (prefix extension), and must replay
+		// cleanly through the full transition rules on a scratch
+		// vault (Rebuild) - all before it comes near the live chain.
+		if err := ledger.CheckDomain(entries, domain); err != nil {
+			continue
+		}
+		if !ledger.IsPrefixExtension(localEntries, entries) {
+			continue
+		}
+		scratch := vault.New(ledger.FromEntries(entries))
+		if err := scratch.Rebuild(); err != nil {
+			continue
+		}
 		best = entries
 		bestFrom = peer
 	}
@@ -543,6 +599,7 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		s.deriveNonces()
 		if !s.persist(w) {
 			return
 		}
@@ -556,10 +613,43 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStatus serves STATUS-01: a read-only, informational view of
+// one account - its balance and consumed nonce - plus the node's
+// current canonical ledger position (height and tip hash). It
+// authorizes nothing; it only reports what the ledger proves.
+func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
+		return
+	}
+	account := r.URL.Query().Get("account")
+	if account == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "account query parameter required"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tip := ""
+	if n := s.v.Log.Len(); n > 0 {
+		tip = s.v.Log.Entries()[n-1].Hash
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account": account,
+		"balance": s.v.Balances[account],
+		"nonce":   s.nonces[account],
+		"height":  s.v.Log.Len(),
+		"tip":     tip,
+		"domain":  s.v.Domain,
+	})
+}
+
 func main() {
 	port := flag.String("port", "8080", "listen port")
 	data := flag.String("data", "grove-data", "data directory")
 	keygen := flag.Bool("keygen", false, "generate an Ed25519 keypair and exit")
+	genesis := flag.String("genesis", "", "path to the genesis config file (required)")
+	role := flag.String("role", "sequencer", "node role: sequencer (the one writer) or follower (read-only)")
+	sequencer := flag.String("sequencer", "", "follower only: base URL of the sequencer to pull from")
 	flag.Parse()
 
 	if *keygen {
@@ -575,29 +665,45 @@ func main() {
 		return
 	}
 
+	if *genesis == "" {
+		log.Fatalf("refusing to start: -genesis <file> is required; a Phase 1 node has no default network")
+	}
+	if *role != "sequencer" && *role != "follower" {
+		log.Fatalf("refusing to start: -role must be sequencer or follower, got %q", *role)
+	}
+	if *role == "follower" && *sequencer == "" {
+		log.Fatalf("refusing to start: follower role requires -sequencer <url>, its only pull source")
+	}
+	rawGenesis, err := os.ReadFile(*genesis)
+	if err != nil {
+		log.Fatalf("refusing to start: read genesis: %v", err)
+	}
+	genesisPayload := strings.TrimSpace(string(rawGenesis))
+
 	s := &server{
-		started:   time.Now(),
-		dataDir:   *data,
-		chainPath: *data + "/chain.json",
-		noncePath: *data + "/nonces.json",
-		port:      *port,
+		started:      time.Now(),
+		dataDir:      *data,
+		chainPath:    *data + "/chain.json",
+		port:         *port,
+		role:         *role,
+		sequencerURL: *sequencer,
 	}
 	v, err := s.loadOrNew()
 	if err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
 	s.v = v
-	nonces, err := loadNonces(s.noncePath)
-	if err != nil {
+	if err := s.applyGenesis(genesisPayload); err != nil {
 		log.Fatalf("refusing to start: %v", err)
 	}
-	s.nonces = nonces
+	s.deriveNonces()
 	s.m.StartedAt = s.started
 
 	http.HandleFunc("/deposit", s.handleDeposit)
 	http.HandleFunc("/redeem", s.handleRedeem)
 	http.HandleFunc("/tip", s.handleTip)
 	http.HandleFunc("/state", s.handleState)
+	http.HandleFunc("/status", s.handleStatus)
 	http.HandleFunc("/ledger", s.handleLedger)
 	http.HandleFunc("/metrics", s.handleMetrics)
 	http.HandleFunc("/peers", s.handlePeers)

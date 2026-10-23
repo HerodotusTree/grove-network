@@ -19,4 +19,3 @@ func TestChain(t *testing.T) {
 		t.Fatal("tampered chain verified clean; want error")
 	}
 }
-
