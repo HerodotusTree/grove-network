@@ -12,6 +12,7 @@ package main
 // Failing-as-intended on the current tree; test assets only.
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -94,11 +95,26 @@ func TestAttack_AdoptCrashWindowBricksNode(t *testing.T) {
 
 	// Simulate Adopt's snapshot rename completing, then a crash before
 	// the journal truncate: new snapshot on disk, old journal untouched.
+	// Adopt writes its commit marker (length + tip hash) BEFORE the
+	// rename, so the faithful crash-point state includes the marker —
+	// it is what lets Load tell this torn adopt apart from a corrupted
+	// journal (which has no matching marker and must still refuse).
 	adopted := ledger.New()
 	adopted.Append(`{"kind":"deposit","amount":700,"reserves_after":700,"claims_after":700,"floor_after":0}`)
 	adopted.Append(`{"kind":"deposit","amount":700,"reserves_after":1400,"claims_after":1400,"floor_after":0}`)
 	data, err := adopted.Dump()
 	if err != nil {
+		t.Fatal(err)
+	}
+	adoptedEntries := adopted.Entries()
+	marker, err := json.Marshal(map[string]any{
+		"entries": len(adoptedEntries),
+		"tip":     adoptedEntries[len(adoptedEntries)-1].Hash,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(chainPath+".adopt", marker, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(chainPath, data, 0600); err != nil {

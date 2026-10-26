@@ -238,7 +238,24 @@ and will fail until sync hardening acceptance rules are implemented.)
     the lock and proceeds only if nothing was appended locally during
     the fetch (a longer peer chain never silently discards operations
     that landed mid-sync).
-  - unconditional local history discard on valid peer forks;
-  - unbounded request body sizes on sync payloads;
+  - unconditional local history discard on valid peer forks —
+    HARDENED: the Phase 1 adoption gate accepts only prefix
+    extensions (local history is never rewritten by sync), staged-
+    replays the candidate through the vault transition rules before
+    any persistence, and verifies every extension entry's signature
+    against the network domain (grove-v2 binding). The torn-adopt
+    crash window is closed by an adopt commit marker (adopted length
+    + tip hash written before the snapshot rename; a matching marker
+    authorizes discarding the stale journal at load, a conflicting
+    journal with no matching marker still refuses to start).
+    Residual, stated plainly: a fresh node still trusts a
+    self-consistent, self-signed history built on the shared
+    genesis — signatures prove authorization by some key, not
+    provenance; binding a history to a trusted origin is AUTH-02's
+    call (issue #1, bootstrap form).
+  - unbounded request body sizes on sync payloads —
+    HARDENED: peer /ledger bodies are capped at 1 MiB and 10,000
+    entries before decode; over-cap peers are skipped. Test-scale
+    sizing, not a production capacity claim.
   - telemetry metrics conflating adopted peer history with local
     operational throughput.

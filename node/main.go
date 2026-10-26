@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -496,6 +497,13 @@ func validatePeerURL(raw string) (string, error) {
 // network error, non-200 status, or undecodable body means the peer is
 // skipped — sync never trusts the network, it only adopts a longer chain
 // that verifies.
+// Sync fetch bounds (issue #13, ported from the daily cycle's
+// Oct 24 hardening pass).
+const (
+	maxPeerLedgerBytes   = 1 << 20 // 1 MiB of peer /ledger body
+	maxPeerLedgerEntries = 10000
+)
+
 func fetchPeerLedger(client *http.Client, peer string) ([]ledger.Entry, error) {
 	resp, err := client.Get(peer + "/ledger")
 	if err != nil {
@@ -505,11 +513,50 @@ func fetchPeerLedger(client *http.Client, peer string) ([]ledger.Entry, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("peer %s: unexpected status %d", peer, resp.StatusCode)
 	}
-	var entries []ledger.Entry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+	// PORTED from the daily cycle's Oct 24 sync hardening (issue #13):
+	// a peer's /ledger body is capped before decode, and the decoded
+	// chain length is capped as well. Test-scale sizing, not a
+	// production capacity claim.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPeerLedgerBytes+1))
+	if err != nil {
 		return nil, err
 	}
+	if len(body) > maxPeerLedgerBytes {
+		return nil, fmt.Errorf("peer %s: ledger body %d bytes exceeds %d-byte cap", peer, len(body), maxPeerLedgerBytes)
+	}
+	var entries []ledger.Entry
+	if err := json.Unmarshal(body, &entries); err != nil {
+		return nil, err
+	}
+	if len(entries) > maxPeerLedgerEntries {
+		return nil, fmt.Errorf("peer %s: ledger has %d entries, exceeds %d-entry cap", peer, len(entries), maxPeerLedgerEntries)
+	}
 	return entries, nil
+}
+
+// verifyExtensionSignatures checks the authorship of candidate
+// entries beyond the local history: each one must be a signed op
+// whose signature verifies against this network's domain, exactly
+// as checkAuth would demand had the op been submitted directly.
+// An unsigned extension entry, or one whose signature was made for
+// a different domain, refuses the whole candidate.
+func verifyExtensionSignatures(extension []ledger.Entry, domain string) error {
+	for _, e := range extension {
+		var op vault.Op
+		if err := json.Unmarshal([]byte(e.Payload), &op); err != nil {
+			return fmt.Errorf("entry %d: unparseable payload: %w", e.Index, err)
+		}
+		if op.Kind == "genesis" {
+			continue
+		}
+		if e.Account == "" || e.Signature == "" {
+			return fmt.Errorf("entry %d: unsigned extension entry", e.Index)
+		}
+		if !identity.Verify(e.Account, identity.PayloadFor(domain, op.Kind, e.Account, op.Amount, e.Nonce), e.Signature) {
+			return fmt.Errorf("entry %d: signature does not verify for this domain", e.Index)
+		}
+	}
+	return nil
 }
 
 // handleSync pulls every peer's chain and adopts the longest valid one.
@@ -581,6 +628,16 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		}
 		scratch := vault.New(ledger.FromEntries(entries))
 		if err := scratch.Rebuild(); err != nil {
+			continue
+		}
+		// PORTED from the daily cycle's Oct 25 adoption gate (issue
+		// #1, Proof Log Entry 18): Rebuild replays the ops but never
+		// checks their signatures, so a signature captured on another
+		// network could be re-homed into an entry stamped with this
+		// network's domain and adopted. Every extension entry beyond
+		// our own history must carry a signature that verifies
+		// against THIS network's domain (grove-v2 payload binding).
+		if err := verifyExtensionSignatures(entries[localLen:], domain); err != nil {
 			continue
 		}
 		best = entries
