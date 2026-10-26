@@ -31,6 +31,52 @@ func TestPayloadFormat(t *testing.T) {
 	}
 }
 
+// RECONCILED 2026-10-26: the cycle's v2 tests were written against its
+// PayloadForGenesis(op, account, amount, nonce, genesis) API. The branch's
+// Phase 1 API is PayloadFor(domain, op, account, amount, nonce) — same
+// grove-v2 binding, domain first, format grove-v2|<domain>|<op>|<account>|
+// <amount>|<nonce>. The tests below are the cycle's, mechanically adapted;
+// every assertion is unchanged.
+func TestPayloadForFormat(t *testing.T) {
+	got := PayloadFor("deadbeef", OpDeposit, "abcd", 100, 1)
+	want := "grove-v2|deadbeef|deposit|abcd|100|1"
+	if got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+	if got := PayloadFor("", OpDeposit, "abcd", 100, 1); got != "grove-v2||deposit|abcd|100|1" {
+		t.Fatalf("genesis-entry payload got %q", got)
+	}
+}
+
+// TestGenesisBinding is the identity-level core of the transplant
+// fix: a signature made for one genesis must not verify for
+// another, a genesis-entry signature (empty genesis) must not verify
+// as a later entry, and a legacy v1 signature is a different payload
+// string from any v2 payload, so it can never accidentally verify
+// where v2 is required.
+func TestGenesisBinding(t *testing.T) {
+	priv, pub, _ := Generate()
+	genesisA, genesisB := "aaaa", "bbbb"
+	sigA, _ := Sign(priv, PayloadFor(genesisA, OpDeposit, pub, 100, 1))
+	if !Verify(pub, PayloadFor(genesisA, OpDeposit, pub, 100, 1), sigA) {
+		t.Fatal("signature for genesis A did not verify on genesis A")
+	}
+	if Verify(pub, PayloadFor(genesisB, OpDeposit, pub, 100, 1), sigA) {
+		t.Fatal("signature for genesis A verified on genesis B: transplant not bound")
+	}
+	genesisSig, _ := Sign(priv, PayloadFor("", OpDeposit, pub, 100, 1))
+	if Verify(pub, PayloadFor(genesisA, OpDeposit, pub, 100, 1), genesisSig) {
+		t.Fatal("genesis-entry signature verified as a later entry")
+	}
+	if Verify(pub, PayloadFor("", OpDeposit, pub, 100, 1), sigA) {
+		t.Fatal("later-entry signature verified as a genesis entry")
+	}
+	v1sig, _ := Sign(priv, Payload(OpDeposit, pub, 100, 1))
+	if Verify(pub, PayloadFor(genesisA, OpDeposit, pub, 100, 1), v1sig) {
+		t.Fatal("legacy v1 signature verified as a v2 signature")
+	}
+}
+
 func TestTamperedPayloadFails(t *testing.T) {
 	priv, pub, _ := Generate()
 	sig, _ := Sign(priv, Payload(OpDeposit, pub, 100, 1))

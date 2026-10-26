@@ -28,11 +28,13 @@ func doSync(s *server) *httptest.ResponseRecorder {
 	return rec
 }
 
-// A1. Cross-node replay. Signatures carry no chain or node binding, and
-// nonce tables are per-node. A signed request captured once (plain HTTP)
-// is good once PER NODE, not once total.
+// A1. Cross-node replay. Phase 1 ruling: the attack is cross-GENESIS
+// replay - a signature binds its network's domain (grove-v2), so bytes
+// captured on one network are worthless on another. (Two writers on
+// the SAME genesis are the sequencer-role question, Phase 2.) B here
+// runs a different genesis than A.
 func TestAttack_CrossNodeReplay(t *testing.T) {
-	a, b := newTestServer(t), newTestServer(t)
+	a, b := newTestServer(t), newTestServerGenesis(t, `{"kind":"genesis","network":"other"}`)
 	priv, pub, _ := identity.Generate()
 	body := signReq(t, identity.OpDeposit, priv, pub, 100, 1)
 
@@ -63,7 +65,7 @@ func TestAttack_ReplayAfterSync_ContradictsKnownLimits(t *testing.T) {
 	if rec := doSync(b); rec.Code != http.StatusOK {
 		t.Fatalf("sync: %d %s", rec.Code, rec.Body.String())
 	}
-	if b.v.R != 100 || b.v.Log.Len() != 1 {
+	if b.v.R != 100 || b.v.Log.Len() != 2 {
 		t.Fatalf("setup: B should hold A's history after sync, got R=%d entries=%d", b.v.R, b.v.Log.Len())
 	}
 	// B now holds the ledger entry for the victim's nonce-1 deposit, but its
@@ -87,7 +89,7 @@ func TestAttack_SyncStepsFloorBackward_MetricsStaySilent(t *testing.T) {
 		t.Fatalf("deposit: %d", rec.Code)
 	}
 	tip, _ := json.Marshal(signedReq{Account: pub, Amount: 25, Nonce: 2,
-		Signature: mustSig(t, priv, identity.Payload(identity.OpTip, pub, 25, 2))})
+		Signature: mustSig(t, priv, identity.PayloadFor(testDomain(), identity.OpTip, pub, 25, 2))})
 	trec := httptest.NewRecorder()
 	b.handleTip(trec, httptest.NewRequest(http.MethodPost, "/tip", bytes.NewReader(tip)))
 	if trec.Code != http.StatusOK {
