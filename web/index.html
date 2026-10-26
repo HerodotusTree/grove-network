@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grove Node</title>
+<style>
+  :root{
+    --bg:#0d120c; --panel:#151d13; --line:#2c3a28;
+    --text:#e6e9df; --muted:#9aa78f; --accent:#8fce62;
+    --warn:#e0b34c; --biz:#d98a4c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+       line-height:1.55;padding:24px 16px 48px}
+  main{max-width:760px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:24px}
+  h1{font-size:1.7rem;margin:0 0 4px}
+  h2{font-size:1.1rem;margin:0 0 10px;letter-spacing:.02em}
+  .sub{color:var(--muted);margin:0}
+  section{background:var(--panel);border:1px solid var(--line);
+          border-radius:10px;padding:18px 20px;margin-bottom:18px}
+  .class-banner{border-radius:10px;padding:18px 20px;margin-bottom:18px;
+                border:1px solid var(--line)}
+  .class-banner .label{font-size:.8rem;text-transform:uppercase;
+                       letter-spacing:.12em;color:var(--muted);margin:0 0 6px}
+  .class-banner .value{font-size:1.5rem;font-weight:700;margin:0 0 8px}
+  .class-banner p{margin:0}
+  .is-personal{border-color:var(--accent)}
+  .is-personal .value{color:var(--accent)}
+  .is-business{border-color:var(--biz)}
+  .is-business .value{color:var(--biz)}
+  section.hardline{border:2px solid var(--biz)}
+  .why{border-left:3px solid var(--biz);padding-left:14px;margin-bottom:14px}
+  .why p{margin:0 0 8px}
+  .why p:last-child{margin-bottom:0}
+  .is-undeclared{border-color:var(--warn)}
+  .is-undeclared .value{color:var(--warn)}
+  ol.terms{margin:0;padding-left:22px}
+  ol.terms li{margin-bottom:10px}
+  ol.terms li:last-child{margin-bottom:0}
+  .stat{display:flex;justify-content:space-between;gap:16px;
+        padding:6px 0;border-bottom:1px dashed var(--line)}
+  .stat:last-child{border-bottom:none}
+  .stat .k{color:var(--muted)}
+  .stat .v{font-variant-numeric:tabular-nums;text-align:right}
+  .note{color:var(--muted);font-size:.92rem}
+  footer{color:var(--muted);font-size:.9rem;border-top:1px solid var(--line);
+         padding-top:16px;margin-top:24px}
+  footer p{margin:0 0 8px}
+  a{color:var(--accent)}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="node-name">Grove Node</h1>
+    <p class="sub">A sovereign node of the Grove network. This page is served by the node itself.</p>
+  </header>
+
+  <!-- NODE CLASS DECLARATION: this is what the page exists to state. -->
+  <div class="class-banner is-undeclared" id="class-banner">
+    <p class="label">Node class</p>
+    <p class="value" id="class-value">Not declared</p>
+    <p id="class-text">This node's class has not been declared in its configuration.
+       Personal use of this program is free. Use as a business or government
+       node requires a business declaration and the terms below — before the
+       program is utilized.</p>
+  </div>
+
+  <section id="personal-terms" hidden>
+    <h2>Personal node terms</h2>
+    <p>For the individual, this program is <strong>completely free</strong> —
+       free to download, free to run, no account, no fee, no permission to
+       ask. Downloadable and accessible to anyone. Individuals are the
+       network, not its customers.</p>
+    <p>If this node is ever put to business or government use, it stops being
+       a personal node: it must be re-declared as a business node and the
+       business terms below must be met first. Personal terms do not carry
+       over to business use, and there is no silent upgrade.</p>
+  </section>
+
+  <section id="business-terms">
+    <h2>Business and government terms — the hard line</h2>
+    <div class="why">
+      <p><strong>What is being built:</strong> a network of sovereign nodes
+         and a vault whose floor is code-enforced backing, built only from
+         what is fed into it, under rules locked at building. No individual —
+         including the founder — owns the floor or can redirect what funds
+         it.</p>
+      <p><strong>Why this line exists:</strong> individuals built this
+         foundation by feeding it, and individuals run it for free because
+         they <em>are</em> the network. An entity with resources does not
+         ride free on that foundation. To utilize this program, a business or
+         government first builds its own standing the same way — it cements
+         its foundation into the same floor and basins. That is the whole of
+         the line: understood completely, or not used at all.</p>
+    </div>
+    <p>A business or government entity utilizing this program must declare
+       its node a business node and meet these terms <em>before</em> use —
+       feed the floor before you take it for a spin:</p>
+    <ol class="terms">
+      <li><strong>Declare.</strong> The node is declared a business node in
+        its configuration. Government entities are business class for these
+        terms.</li>
+      <li><strong>Cement your foundation.</strong> The entity cements its own
+        foundation with volatile digital currency passed through the
+        converter. Converted value is divided across the basins; the floor's
+        share backs the coin one to one.</li>
+      <li><strong>No digital currency? An agreed amount instead.</strong> An
+        entity that holds no volatile digital currency may offer a dollar
+        amount agreed upon by the parties involved. The agreed amount is used
+        to purchase volatile digital currency, which then passes through the
+        converter exactly as above — dollars themselves never enter the
+        floor.</li>
+      <li><strong>The money funds the floor and the basins — never an
+        individual.</strong> By either path, what enters is converted value
+        through the converter, and it goes to the floor and the basins. It is
+        not payment to any person.</li>
+      <li><strong>Personal use stays free.</strong> These terms are the price
+        of business and government use only. They do not apply to individuals
+        running personal nodes.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Node state</h2>
+    <div class="stat"><span class="k">Reserves (R)</span><span class="v" id="st-r">—</span></div>
+    <div class="stat"><span class="k">Circulating (C)</span><span class="v" id="st-c">—</span></div>
+    <div class="stat"><span class="k">Floor</span><span class="v" id="st-floor">—</span></div>
+    <div class="stat"><span class="k">Ledger entries</span><span class="v" id="st-entries">—</span></div>
+    <p class="note" id="state-note">Live state is read from this node's own
+      endpoints when the page is served by the node. All values are test
+      assets. Nothing on this node is real money, and no coin is issued.</p>
+  </section>
+
+  <footer>
+    <p>Software sovereignty is available today. Financial sovereignty is
+       tomorrow's work, gated on the legal path.</p>
+    <p>This node is public. Pseudonymity is not anonymity or transport
+       privacy.</p>
+    <p>Source: <a href="https://github.com/HerodotusTree/grove-network">github.com/HerodotusTree/grove-network</a></p>
+  </footer>
+</main>
+
+<script>
+(function(){
+  var banner = document.getElementById('class-banner');
+  var value  = document.getElementById('class-value');
+  var text   = document.getElementById('class-text');
+  var nameEl = document.getElementById('node-name');
+  var personalTerms = document.getElementById('personal-terms');
+
+  function setClass(cls, nodeName){
+    if(nodeName){ nameEl.textContent = nodeName; document.title = nodeName; }
+    banner.classList.remove('is-personal','is-business','is-undeclared');
+    if(cls === 'personal'){
+      banner.classList.add('is-personal');
+      value.textContent = 'Personal node';
+      text.textContent = 'This node is declared for personal use. For the individual this program is completely free — downloadable, accessible, no fee, no permission. Individuals are the network. Business or government use requires re-declaration and the business terms below.';
+      personalTerms.hidden = false;
+    } else if(cls === 'business'){
+      banner.classList.add('is-business');
+      value.textContent = 'Business node';
+      text.textContent = 'This node is declared for business or government use. The terms below are the hard line, and they are met before the program is utilized: feed the floor before you take it for a spin.';
+      personalTerms.hidden = true;
+      // The hard line goes directly under the declaration: unmissable.
+      var terms = document.getElementById('business-terms');
+      terms.classList.add('hardline');
+      banner.parentNode.insertBefore(terms, banner.nextSibling);
+    } else {
+      banner.classList.add('is-undeclared');
+      value.textContent = 'Not declared';
+      personalTerms.hidden = true;
+    }
+  }
+
+  // Node class comes from the node's own configuration. Served by
+  // the node, the class lives in the genesis config file and is
+  // read from /status (see INTEGRATION.md). /status is
+  // account-scoped (STATUS-01), so the page asks after a probe
+  // account and reads only the node fields of the reply. If /status
+  // does not answer - the page opened standalone - fall back to
+  // node.json beside this page. If /status answers, it is
+  // authoritative, including when it declares nothing.
+  fetch('status?account=node').then(function(r){
+    if(!r.ok) throw new Error('status ' + r.status);
+    return r.json();
+  }).then(function(st){
+    setClass(st.node_class, st.node_name);
+  }).catch(function(){
+    fetch('node.json').then(function(r){ return r.json(); }).then(function(cfg){
+      setClass(cfg.node_class, cfg.node_name);
+    }).catch(function(){ /* keep the undeclared banner */ });
+  });
+
+  function setText(id, v){ document.getElementById(id).textContent = v; }
+
+  // Live state from the node's own endpoints, same origin. Fails soft:
+  // the dashes stay if the page is opened away from the node.
+  fetch('state').then(function(r){ return r.json(); }).then(function(s){
+    if(typeof s.R !== 'undefined') setText('st-r', s.R);
+    if(typeof s.C !== 'undefined') setText('st-c', s.C);
+    if(typeof s.floor !== 'undefined') setText('st-floor', s.floor);
+  }).catch(function(){});
+  fetch('metrics').then(function(r){ return r.json(); }).then(function(m){
+    if(typeof m.entries !== 'undefined') setText('st-entries', m.entries);
+  }).catch(function(){});
+})();
+</script>
+</body>
+</html>

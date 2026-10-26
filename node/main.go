@@ -74,6 +74,13 @@ type server struct {
 	role string
 	// sequencerURL is a follower's configured pull source (-sequencer).
 	sequencerURL string
+	// nodeClass and nodeName are the node's declared identity from
+	// its genesis config file ("node_class": "personal"|"business",
+	// "node_name": free text) - the declaration the node web page
+	// exists to state. Empty nodeClass means undeclared: never
+	// assumed, never defaulted. See web/ and INTEGRATION.md.
+	nodeClass string
+	nodeName  string
 }
 
 func (s *server) chainFile() string { return s.chainPath }
@@ -106,7 +113,31 @@ func (s *server) loadOrNew() (*vault.Vault, error) {
 // genesis (CheckDomain) - a chain with the wrong genesis file refuses
 // to start (A3). The vault stamps the resulting domain into every
 // entry it records.
+// genesisConfig is the node's view of the genesis config file. The
+// payload itself stays opaque to the ledger - entry 0 stores it
+// verbatim and its hash is the domain - but the node reads its own
+// declared identity (class and name) out of the same file, so the
+// declaration lives in exactly one place: the operator's config.
+type genesisConfig struct {
+	NodeClass string `json:"node_class"`
+	NodeName  string `json:"node_name"`
+}
+
+// parseGenesisConfig reads the declared identity out of a genesis
+// payload. It never fails: a payload that is not JSON, or a config
+// without the fields, simply declares nothing.
+func parseGenesisConfig(payload string) genesisConfig {
+	var cfg genesisConfig
+	_ = json.Unmarshal([]byte(payload), &cfg)
+	return cfg
+}
+
 func (s *server) applyGenesis(payload string) error {
+	// The declared identity travels with the config file, whatever
+	// path startup takes from here. The payload passed to the
+	// ledger below is the operator's bytes, untouched.
+	cfg := parseGenesisConfig(payload)
+	s.nodeClass, s.nodeName = cfg.NodeClass, cfg.NodeName
 	probe := ledger.New()
 	g, err := probe.AppendGenesis(payload)
 	if err != nil {
@@ -697,6 +728,11 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"height":  s.v.Log.Len(),
 		"tip":     tip,
 		"domain":  s.v.Domain,
+		// The node's declared identity, from its genesis config.
+		// Additive: the account view above is unchanged. The node
+		// web page reads its class from here (INTEGRATION.md).
+		"node_class": s.nodeClass,
+		"node_name":  s.nodeName,
 	})
 }
 
@@ -765,6 +801,14 @@ func main() {
 	http.HandleFunc("/metrics", s.handleMetrics)
 	http.HandleFunc("/peers", s.handlePeers)
 	http.HandleFunc("/sync", s.handleSync)
+	// Node web page (class declaration, terms, live state), served
+	// from the web/ folder. Pattern specificity, not registration
+	// order, decides: Go's mux prefers the exact endpoint patterns
+	// above, so "/" only catches what no endpoint claims. The
+	// folder is relative to the node's working directory - run
+	// the node from the repo root (or beside a web/ folder). See
+	// INTEGRATION.md.
+	http.Handle("/", http.FileServer(http.Dir("web")))
 	fmt.Printf("Grove sequencer listening on :%s (data: %s)\n", s.port, s.dataDir)
 	log.Fatal(http.ListenAndServe(":"+s.port, nil))
 }
