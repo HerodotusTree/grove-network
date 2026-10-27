@@ -56,13 +56,28 @@ type Metrics struct {
 }
 
 type server struct {
-	mu        sync.Mutex
-	v         *vault.Vault
-	started   time.Time
-	m         Metrics
-	peers     []string
-	dataDir   string
-	chainPath string
+	mu      sync.Mutex
+	v       *vault.Vault
+	started time.Time
+	m       Metrics
+	peers   []string
+	// untrustedPeers holds peers registered by unauthenticated POST
+	// /peers. They are listed and fetched like trusted peers, but
+	// they can never supply a fresh node's first history: only
+	// operator-configured peers (peers, via -trusted-peer) can
+	// bootstrap a node that holds no history beyond genesis
+	// (AUTH-02 bootstrap trust, Proof Log Entry 22). Fetch is not
+	// adoption: an untrusted peer's chain is still pulled and
+	// checked, it just cannot become a fresh node's state.
+	untrustedPeers []string
+	// trustedGenesis, when non-empty, is the operator's out-of-band
+	// entry-0 hash a bootstrap candidate must carry. It is a second
+	// pin beside the genesis config file, which already pins the
+	// domain through CheckDomain; the flag pins the candidate's
+	// entry-0 hash independently of the local config.
+	trustedGenesis string
+	dataDir        string
+	chainPath      string
 	// nonces tracks the last accepted nonce per account. A new account
 	// starts at 0, so its first operation must carry nonce 1. Nonces are
 	// the replay defense: a signed request is only good once.
@@ -425,8 +440,15 @@ func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	m.UptimeSeconds = int64(time.Since(s.started).Seconds())
 	m.LedgerEntries = s.v.Log.Len()
 	m.ChainValid = s.v.Log.Verify() == nil
-	m.Peers = len(s.peers)
+	m.Peers = len(s.peers) + len(s.untrustedPeers)
 	writeJSON(w, http.StatusOK, m)
+}
+
+// allPeers joins the trusted and untrusted peer lists for listing
+// and fetching. Trust is decided at adoption, not at listing.
+func allPeers(trusted, untrusted []string) []string {
+	out := make([]string, 0, len(trusted)+len(untrusted))
+	return append(append(out, trusted...), untrusted...)
 }
 
 func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
@@ -434,7 +456,7 @@ func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+		writeJSON(w, http.StatusOK, map[string]any{"peers": allPeers(s.peers, s.untrustedPeers)})
 	case http.MethodPost:
 		// Decode and validate BEFORE taking the op lock. The request
 		// body is network I/O: holding s.mu across it would let any
@@ -456,14 +478,17 @@ func (s *server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		for _, p := range s.peers {
+		for _, p := range allPeers(s.peers, s.untrustedPeers) {
 			if p == canonical {
-				writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+				writeJSON(w, http.StatusOK, map[string]any{"peers": allPeers(s.peers, s.untrustedPeers)})
 				return
 			}
 		}
-		s.peers = append(s.peers, canonical)
-		writeJSON(w, http.StatusOK, map[string]any{"peers": s.peers})
+		// Unauthenticated registrants are untrusted by construction:
+		// they may be fetched, but they can never bootstrap a fresh
+		// node (see handleSync's bootstrap rule).
+		s.untrustedPeers = append(s.untrustedPeers, canonical)
+		writeJSON(w, http.StatusOK, map[string]any{"peers": allPeers(s.peers, s.untrustedPeers)})
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET or POST only"})
 	}
@@ -607,14 +632,26 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	peers := append([]string(nil), s.peers...)
+	peers := allPeers(s.peers, s.untrustedPeers)
+	trusted := map[string]bool{}
+	for _, p := range s.peers {
+		trusted[p] = true
+	}
 	if s.role == "follower" {
 		// Followers pull only from the configured sequencer (N1):
-		// peer registrations mean nothing to them.
+		// peer registrations mean nothing to them. The sequencer
+		// is operator-configured, so it is trusted by construction.
 		peers = []string{s.sequencerURL}
+		trusted[s.sequencerURL] = true
 	}
+	trustedGenesis := s.trustedGenesis
 	localEntries := s.v.Log.Entries()
 	localLen := len(localEntries)
+	// Branch chains always begin with the genesis entry, so len <= 1
+	// means the node holds no history beyond genesis: len 0 is a
+	// follower awaiting entry 0, len 1 is genesis only. Only fresh
+	// nodes are governed by the bootstrap rule below.
+	fresh := localLen <= 1
 	domain := s.v.Domain
 	s.mu.Unlock()
 
@@ -669,6 +706,21 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		// our own history must carry a signature that verifies
 		// against THIS network's domain (grove-v2 payload binding).
 		if err := verifyExtensionSignatures(entries[localLen:], domain); err != nil {
+			continue
+		}
+		// AUTH-02 bootstrap trust (Proof Log Entry 22): a node
+		// holding no history beyond genesis adopts only from a
+		// trusted peer. A stranger's fully self-signed history
+		// verifies against the public domain — the gate
+		// authenticates entries, and they ARE authenticated, by
+		// the stranger himself — so peer trust, not signature
+		// validity, is what must refuse it here. Non-empty nodes
+		// are unaffected: extension trust for them is Entry 23,
+		// still open.
+		if fresh && !trusted[peer] {
+			continue
+		}
+		if fresh && trustedGenesis != "" && entries[0].Hash != trustedGenesis {
 			continue
 		}
 		best = entries
@@ -736,6 +788,15 @@ func (s *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// stringListFlag collects a repeatable string flag (-trusted-peer).
+type stringListFlag []string
+
+func (f *stringListFlag) String() string { return strings.Join(*f, ",") }
+func (f *stringListFlag) Set(v string) error {
+	*f = append(*f, v)
+	return nil
+}
+
 func main() {
 	port := flag.String("port", "8080", "listen port")
 	data := flag.String("data", "grove-data", "data directory")
@@ -743,6 +804,9 @@ func main() {
 	genesis := flag.String("genesis", "", "path to the genesis config file (required)")
 	role := flag.String("role", "sequencer", "node role: sequencer (the one writer) or follower (read-only)")
 	sequencer := flag.String("sequencer", "", "follower only: base URL of the sequencer to pull from")
+	trustedPeers := stringListFlag{}
+	flag.Var(&trustedPeers, "trusted-peer", "operator-trusted peer base URL (repeatable); only trusted peers can supply a fresh node's first history")
+	trustedGenesis := flag.String("trusted-genesis", "", "entry-0 hash a bootstrap candidate must carry (empty: any trusted peer's genesis)")
 	flag.Parse()
 
 	if *keygen {
@@ -773,13 +837,28 @@ func main() {
 	}
 	genesisPayload := strings.TrimSpace(string(rawGenesis))
 
+	// Trusted peers are canonicalized at startup, the same way
+	// registrations are canonicalized at POST /peers: a trailing
+	// slash must never make a trusted peer unrecognizable at
+	// adoption time.
+	canonicalTrusted := make([]string, 0, len(trustedPeers))
+	for _, p := range trustedPeers {
+		c, err := validatePeerURL(p)
+		if err != nil {
+			log.Fatalf("refusing to start: -trusted-peer %q: %v", p, err)
+		}
+		canonicalTrusted = append(canonicalTrusted, c)
+	}
+
 	s := &server{
-		started:      time.Now(),
-		dataDir:      *data,
-		chainPath:    *data + "/chain.json",
-		port:         *port,
-		role:         *role,
-		sequencerURL: *sequencer,
+		started:        time.Now(),
+		dataDir:        *data,
+		chainPath:      *data + "/chain.json",
+		port:           *port,
+		role:           *role,
+		sequencerURL:   *sequencer,
+		peers:          canonicalTrusted,
+		trustedGenesis: *trustedGenesis,
 	}
 	v, err := s.loadOrNew()
 	if err != nil {

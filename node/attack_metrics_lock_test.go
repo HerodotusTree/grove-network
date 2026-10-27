@@ -136,8 +136,12 @@ func TestAttack_PeerListUnbounded(t *testing.T) {
 		}
 	}
 	regElapsed := time.Since(start)
-	if len(s.peers) != peers {
-		t.Fatalf("peer table holds %d entries, want %d (uncapped)", len(s.peers), peers)
+	// The peer table is split since AUTH-02 bootstrap trust (Entry
+	// 22): POST /peers registrants are untrusted, so the full table
+	// is trusted + untrusted. The M2 demonstration measures the
+	// whole table, not one side of it.
+	if len(s.peers)+len(s.untrustedPeers) != peers {
+		t.Fatalf("peer table holds %d entries, want %d (uncapped)", len(s.peers)+len(s.untrustedPeers), peers)
 	}
 	t.Logf("registered %d unauthenticated peers in %v (no cap, linear-scan dedup)",
 		peers, regElapsed.Round(time.Millisecond))
