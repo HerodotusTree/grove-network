@@ -708,16 +708,25 @@ func (s *server) handleSync(w http.ResponseWriter, r *http.Request) {
 		if err := verifyExtensionSignatures(entries[localLen:], domain); err != nil {
 			continue
 		}
-		// AUTH-02 bootstrap trust (Proof Log Entry 22): a node
-		// holding no history beyond genesis adopts only from a
-		// trusted peer. A stranger's fully self-signed history
-		// verifies against the public domain — the gate
-		// authenticates entries, and they ARE authenticated, by
-		// the stranger himself — so peer trust, not signature
-		// validity, is what must refuse it here. Non-empty nodes
-		// are unaffected: extension trust for them is Entry 23,
-		// still open.
-		if fresh && !trusted[peer] {
+		// AUTH-02 adoption trust (Proof Log Entries 22 and 23): a
+		// node adopts ONLY from a trusted peer, at any height.
+		// Entry 22 was the bootstrap form: a node holding no
+		// history beyond genesis must not adopt a stranger's fully
+		// self-signed history — it verifies against the public
+		// domain, because the gate authenticates entries, and they
+		// ARE authenticated, by the stranger himself. Entry 23 is
+		// the same hole one step later: a non-empty node adopting
+		// a stranger's genuinely signed but unfunded extension and
+		// ratcheting its floor. A signature proves an account
+		// authorized an op, not that the op was funded or that the
+		// peer is honest, so peer trust — not signature validity —
+		// is the adoption decision at every height. Untrusted
+		// peers are still fetched and listed (fetching is not
+		// adoption); their candidates simply never win. Followers
+		// are unaffected: their only peer is the
+		// operator-configured sequencer, trusted by construction
+		// above.
+		if !trusted[peer] {
 			continue
 		}
 		if fresh && trustedGenesis != "" && entries[0].Hash != trustedGenesis {
