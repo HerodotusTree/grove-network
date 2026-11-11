@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 
 	"github.com/HerodotusTree/grove-network/identity"
@@ -13,22 +12,39 @@ import (
 	"github.com/HerodotusTree/grove-network/vault"
 )
 
+const testGenesis = `{"kind":"genesis","network":"test"}`
+
+func testDomain() string {
+	probe := ledger.New()
+	g, err := probe.AppendGenesis(testGenesis)
+	if err != nil {
+		panic(err)
+	}
+	return g.Hash
+}
+
 func newTestServer(t *testing.T) *server {
+	return newTestServerGenesis(t, testGenesis)
+}
+func newTestServerGenesis(t *testing.T, genesis string) *server {
 	t.Helper()
 	dir := t.TempDir()
-	return &server{
+	s := &server{
 		v:         vault.New(ledger.New()),
 		nonces:    map[string]uint64{},
 		dataDir:   dir,
 		chainPath: dir + "/chain.json",
-		noncePath: dir + "/nonces.json",
 	}
+	if err := s.applyGenesis(genesis); err != nil {
+		t.Fatalf("test genesis: %v", err)
+	}
+	return s
 }
 
 // signReq builds a signed request body for op as the holder of privHex.
 func signReq(t *testing.T, op, privHex, account string, amount int64, nonce uint64) []byte {
 	t.Helper()
-	sig, err := identity.Sign(privHex, identity.Payload(op, account, amount, nonce))
+	sig, err := identity.Sign(privHex, identity.PayloadFor(testDomain(), op, account, amount, nonce))
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -46,7 +62,7 @@ func postDeposit(s *server, body []byte) *httptest.ResponseRecorder {
 func TestCheckAuthValid(t *testing.T) {
 	s := newTestServer(t)
 	priv, pub, _ := identity.Generate()
-	sig, _ := identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 100, 1))
+	sig, _ := identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 1))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,12 +79,12 @@ func TestCheckAuthBadNonce(t *testing.T) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// First op must be nonce 1, not 2.
-	sig, _ := identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 100, 2))
+	sig, _ := identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 2))
 	if err := s.checkAuth(identity.OpDeposit, signedReq{Account: pub, Amount: 100, Nonce: 2, Signature: sig}); err == nil {
 		t.Fatal("nonce 2 accepted as first op")
 	}
 	// Nonce 0 is never valid.
-	sig, _ = identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 100, 0))
+	sig, _ = identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 0))
 	if err := s.checkAuth(identity.OpDeposit, signedReq{Account: pub, Amount: 100, Nonce: 0, Signature: sig}); err == nil {
 		t.Fatal("nonce 0 accepted")
 	}
@@ -77,7 +93,7 @@ func TestCheckAuthBadNonce(t *testing.T) {
 func TestCheckAuthReplayRejected(t *testing.T) {
 	s := newTestServer(t)
 	priv, pub, _ := identity.Generate()
-	sig, _ := identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 100, 1))
+	sig, _ := identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 1))
 	req := signedReq{Account: pub, Amount: 100, Nonce: 1, Signature: sig}
 
 	s.mu.Lock()
@@ -96,7 +112,7 @@ func TestCheckAuthBadSignature(t *testing.T) {
 	s := newTestServer(t)
 	priv, pub, _ := identity.Generate()
 	// Sign a different amount than the one claimed.
-	sig, _ := identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 999, 1))
+	sig, _ := identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 999, 1))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -106,7 +122,7 @@ func TestCheckAuthBadSignature(t *testing.T) {
 	}
 	// And a signature from a different key entirely.
 	priv2, _, _ := identity.Generate()
-	sig2, _ := identity.Sign(priv2, identity.Payload(identity.OpDeposit, pub, 100, 1))
+	sig2, _ := identity.Sign(priv2, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 1))
 	if err := s.checkAuth(identity.OpDeposit, signedReq{Account: pub, Amount: 100, Nonce: 1, Signature: sig2}); err == nil {
 		t.Fatal("wrong-key signature accepted")
 	}
@@ -125,7 +141,7 @@ func TestCheckAuthWrongOp(t *testing.T) {
 	s := newTestServer(t)
 	priv, pub, _ := identity.Generate()
 	// A deposit signature presented as a redeem must fail.
-	sig, _ := identity.Sign(priv, identity.Payload(identity.OpDeposit, pub, 100, 1))
+	sig, _ := identity.Sign(priv, identity.PayloadFor(testDomain(), identity.OpDeposit, pub, 100, 1))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,32 +201,27 @@ func TestNoncesPersistAcrossRestart(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deposit: %d", rec.Code)
 	}
-	// Simulate a restart: fresh server, same data dir.
-	s2 := &server{
-		v:         vault.New(ledger.New()),
-		dataDir:   s.dataDir,
-		chainPath: s.chainPath,
-		noncePath: s.noncePath,
-	}
-	nonces, err := loadNonces(s2.noncePath)
+	// Simulate a restart: fresh server, same data dir. Nonce state is
+	// rebuilt from the ledger alone - there is no nonce file anymore.
+	s2 := &server{dataDir: s.dataDir, chainPath: s.chainPath}
+	v, err := s2.loadOrNew()
 	if err != nil {
-		t.Fatalf("load nonces: %v", err)
+		t.Fatalf("reload chain: %v", err)
 	}
-	s2.nonces = nonces
+	s2.v = v
+	if err := s2.applyGenesis(testGenesis); err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+	s2.deriveNonces()
 	// The old nonce must still be rejected after restart.
 	rec = postDeposit(s2, signReq(t, identity.OpDeposit, priv, pub, 100, 1))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("replay after restart: got %d, want 401", rec.Code)
 	}
-}
-
-func TestCorruptNoncesRefusesStartup(t *testing.T) {
-	s := newTestServer(t)
-	if err := os.WriteFile(s.noncePath, []byte("{not json"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadNonces(s.noncePath); err == nil {
-		t.Fatal("corrupt nonces.json loaded without error")
+	// And the next nonce must work: the rebuilt table is exact.
+	rec = postDeposit(s2, signReq(t, identity.OpDeposit, priv, pub, 50, 2))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("next nonce after restart: got %d, body %s", rec.Code, rec.Body.String())
 	}
 }
 

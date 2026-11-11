@@ -21,6 +21,58 @@ func journalPath(path string) string {
 	return filepath.Join(filepath.Dir(path), "journal.jsonl")
 }
 
+// adoptMarker names a chain Adopt committed to: its length and its tip
+// hash. Adopt writes it before renaming the new snapshot into place
+// and deletes it after truncating the journal, so a marker matching
+// the snapshot on disk is proof that the snapshot is a committed adopt
+// and the journal beside it is stale. The format is deliberately tiny
+// and JSON: {"entries":N,"tip":"<hash>"} — also the shape
+// TestAttack_AdoptCrashWindowBricksNode writes when it models Adopt's
+// crash point (marker + snapshot, journal untouched).
+type adoptMarker struct {
+	Entries int    `json:"entries"`
+	Tip     string `json:"tip"`
+}
+
+func adoptMarkerPath(path string) string { return path + ".adopt" }
+
+func writeAdoptMarker(path string, entries []Entry) error {
+	m := adoptMarker{Entries: len(entries)}
+	if len(entries) > 0 {
+		m.Tip = entries[len(entries)-1].Hash
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(adoptMarkerPath(path), data, 0600)
+}
+
+// readAdoptMarker returns false for a missing or malformed marker: a
+// marker that cannot be read authorizes nothing, and Load then falls
+// back to the normal journal replay (and its conflict refusal).
+func readAdoptMarker(path string) (adoptMarker, bool) {
+	var m adoptMarker
+	data, err := os.ReadFile(adoptMarkerPath(path))
+	if err != nil {
+		return m, false
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return m, false
+	}
+	return m, true
+}
+
+func (m adoptMarker) matches(entries []Entry) bool {
+	if m.Entries != len(entries) {
+		return false
+	}
+	if len(entries) == 0 {
+		return m.Tip == ""
+	}
+	return m.Tip == entries[len(entries)-1].Hash
+}
+
 // Save appends any not-yet-journaled entries to the journal, fsyncs, and
 // compacts when the journal grows past compactEvery entries.
 func (l *Ledger) Save(path string) error {
@@ -113,6 +165,30 @@ func Load(path string) (*Ledger, error) {
 	default:
 		return nil, err
 	}
+	// Torn-adopt reconciliation (issue #1): Adopt writes a commit
+	// marker naming the adopted chain (length + tip hash) BEFORE it
+	// renames the new snapshot into place, and deletes the marker only
+	// after truncating the journal. A crash between the rename and the
+	// truncate therefore leaves marker + new snapshot + old journal —
+	// and only that combination authorizes discarding the journal: the
+	// snapshot is provably the committed adopt, the journal provably
+	// stale history from before it. A marker that does not match the
+	// snapshot means the adopt never committed (crash before the
+	// rename) or the marker is corrupt: drop it and load normally, so
+	// the old chain — journal included — survives. A conflicting
+	// journal with NO matching marker still refuses in replayJournal,
+	// preserving the corruption guarantee.
+	if marker, ok := readAdoptMarker(path); ok {
+		if !snapMissing && marker.matches(l.entries) {
+			if err := os.Truncate(journalPath(path), 0); err != nil {
+				return nil, fmt.Errorf("load: torn adopt, journal discard failed: %w", err)
+			}
+			_ = os.Remove(adoptMarkerPath(path))
+			l.journaled = uint64(len(l.entries))
+			return l, nil
+		}
+		_ = os.Remove(adoptMarkerPath(path))
+	}
 	if jerr := l.replayJournal(journalPath(path)); jerr != nil {
 		if os.IsNotExist(jerr) && snapMissing {
 			return nil, err // nothing on disk: fresh start
@@ -146,7 +222,17 @@ func (l *Ledger) replayJournal(jp string) error {
 		// Compaction replaces the snapshot before truncating the journal.
 		// A process interruption between those writes leaves an overlap.
 		// Skip only records already in the loaded snapshot, and require an
-		// exact match so a conflicting history is never hidden.
+		// exact match so a conflicting history is never hidden: a
+		// conflict here refuses to start, by design (see
+		// TestRecoveryRejectsConflictingSnapshotOverlap). The torn-adopt
+		// case — Adopt's snapshot rename landing before its journal
+		// truncate — is NOT reconciled here, because a torn adopt and
+		// a corrupted journal are content-identical at this point
+		// (snapshot and journal disagree at the same index). It is
+		// reconciled in Load itself, via Adopt's commit marker: only a
+		// marker matching the snapshot authorizes discarding the stale
+		// journal. Without a matching marker, a conflict is corruption
+		// and refuses, exactly as before.
 		if e.Index < snapshotLen {
 			if e != l.entries[e.Index] {
 				return fmt.Errorf("load: journal line %d conflicts with snapshot entry %d", i, e.Index)

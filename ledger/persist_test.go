@@ -181,6 +181,107 @@ func TestLoadMissingChainIsFreshStart(t *testing.T) {
 	}
 }
 
+// TestRecoveryRebuildsFromJournalWhenSnapshotMissing: the snapshot file
+// is gone (deleted, lost) but the append-only journal survived with the
+// full history from genesis. Load must rebuild the chain from the
+// journal alone — the snapMissing branch — not refuse and not start a
+// fresh chain. Post-recovery accounting must also hold: a later Save
+// journals only new entries, and the rebuilt chain survives a restart.
+func TestRecoveryRebuildsFromJournalWhenSnapshotMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chain.json")
+
+	l := New()
+	appendN(l, 5, "deposit")
+	if err := l.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// Hand-roll the post-compaction state (snapshot + full overlapping
+	// journal), then lose the snapshot file.
+	snap, err := l.Dump()
+	if err != nil {
+		t.Fatalf("dump: %v", err)
+	}
+	if err := os.WriteFile(path, snap, 0600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	want := l.Entries()
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("load with snapshot missing but journal intact refused: %v", err)
+	}
+	if got.Len() != len(want) {
+		t.Fatalf("recovered %d entries, want %d", got.Len(), len(want))
+	}
+	if err := got.Verify(); err != nil {
+		t.Fatalf("rebuilt chain failed verify: %v", err)
+	}
+	for i := range want {
+		a, b := want[i], got.Entries()[i]
+		if a.Hash != b.Hash || a.Payload != b.Payload || a.Index != b.Index || a.PrevHash != b.PrevHash {
+			t.Fatalf("entry %d differs after journal-only rebuild", i)
+		}
+	}
+
+	// The recovered ledger must keep journaling correctly: only the new
+	// entry may be appended, and a second restart must see all of it.
+	got.Append("after recovery")
+	if err := got.Save(path); err != nil {
+		t.Fatalf("save after recovery: %v", err)
+	}
+	if n := strings.Count(readJournal(t, dir), "\n"); n != 6 {
+		t.Fatalf("want 6 journal lines after append+save, got %d", n)
+	}
+	restarted, err := Load(path)
+	if err != nil {
+		t.Fatalf("restart after recovery: %v", err)
+	}
+	if restarted.Len() != 6 || restarted.Entries()[5].Payload != "after recovery" {
+		t.Fatalf("restarted chain wrong: len=%d", restarted.Len())
+	}
+	if err := restarted.Verify(); err != nil {
+		t.Fatalf("restarted chain failed verify: %v", err)
+	}
+}
+
+// TestRecoveryRefusesWhenSnapshotMissingAndJournalTruncated: the evil
+// twin of the rebuild test. Compaction already consumed the journal
+// (snapshot held the prefix, journal was truncated), then the snapshot
+// file was lost. The surviving journal starts mid-chain, so the history
+// is genuinely unrecoverable — Load must refuse rather than silently
+// start a forked chain at the wrong genesis.
+func TestRecoveryRefusesWhenSnapshotMissingAndJournalTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chain.json")
+
+	l := New()
+	appendN(l, compactEvery, "deposit")
+	if err := l.Save(path); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	appendN(l, 3, "post-compaction")
+	if err := l.Save(path); err != nil {
+		t.Fatalf("save post-compaction entries: %v", err)
+	}
+	// Snapshot held entries 0..compactEvery-1; the journal on disk
+	// starts at index compactEvery. Now lose the snapshot.
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove snapshot: %v", err)
+	}
+
+	got, err := Load(path)
+	if err == nil {
+		t.Fatalf("load accepted a journal that starts mid-chain; got %d entries, want refusal", got.Len())
+	}
+	if !strings.Contains(err.Error(), "index") {
+		t.Fatalf("want an index-continuity error, got: %v", err)
+	}
+}
+
 // TestCorruptFinalLineBrokenLinkRefuses: a final journal line that parses
 // as JSON but breaks the chain (wrong prev_hash — e.g. a torn write that
 // coincidentally parses, or a bit flip) is not a recoverable torn tail.

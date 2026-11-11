@@ -34,12 +34,14 @@ func TestHealthyFlow(t *testing.T) {
 
 func TestImpairment(t *testing.T) {
 	v := New(ledger.New())
-	// Force impairment directly (simulates a loss event).
+	// Force impairment directly (simulates a loss event). The claims
+	// belong to an account: under OWN-01 there are no ownerless claims.
 	v.R, v.C = 80, 100
+	v.Balances["acct"] = 100
 	if err := v.Deposit(10); err == nil {
 		t.Fatal("deposit during impairment should be rejected")
 	}
-	payout, err := v.Redeem(50)
+	payout, err := v.RedeemFor("acct", 1, "sig", 50)
 	if err != nil {
 		t.Fatal(err)
 	}

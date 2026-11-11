@@ -29,7 +29,9 @@ const (
 	OpTip     = "tip"
 )
 
-// Payload builds the canonical string that gets signed:
+// Payload builds the canonical string that gets signed (v0.3 legacy
+// format - kept only until the node migrates to PayloadFor, then removed;
+// the Phase 1 format break is clean, per ruling 3):
 // grove-v1|<op>|<accountHex>|<amount>|<nonce>
 // Every field is positional and unambiguous, so the same operation can
 // never be re-signed into a different one, and the same signature can
@@ -37,6 +39,27 @@ const (
 func Payload(op, accountHex string, amount int64, nonce uint64) string {
 	return strings.Join([]string{
 		PayloadVersion,
+		op,
+		accountHex,
+		strconv.FormatInt(amount, 10),
+		strconv.FormatUint(nonce, 10),
+	}, "|")
+}
+
+// PayloadVersionV2 pins the Phase 1 signing format. The format changed,
+// so the version bumped (the rule PayloadVersion documents): v0.3
+// signatures over the v1 format cannot verify under v2, by construction.
+const PayloadVersionV2 = "grove-v2"
+
+// PayloadFor builds the canonical Phase 1 string that gets signed:
+// grove-v2|<domain>|<op>|<accountHex>|<amount>|<nonce>
+// The domain is the network's genesis hash. Binding it into every
+// signature means a signature made on one Grove can never be replayed
+// on another (acceptance exam A1).
+func PayloadFor(domain, op, accountHex string, amount int64, nonce uint64) string {
+	return strings.Join([]string{
+		PayloadVersionV2,
+		domain,
 		op,
 		accountHex,
 		strconv.FormatInt(amount, 10),

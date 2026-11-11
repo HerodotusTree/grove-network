@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,7 @@ import (
 type signer struct {
 	priv    string
 	account string
+	domain  string
 	// next is the nonce to try next. It advances ONLY when the server
 	// accepts the op: the node advances its record only on acceptance
 	// too, so a rejected attempt must be retried with the same nonce,
@@ -35,7 +37,7 @@ type signer struct {
 }
 
 func (s *signer) post(url, op string, amount int64) bool {
-	sig, err := identity.Sign(s.priv, identity.Payload(op, s.account, amount, s.next))
+	sig, err := identity.Sign(s.priv, identity.PayloadFor(s.domain, op, s.account, amount, s.next))
 	if err != nil {
 		return false
 	}
@@ -57,11 +59,39 @@ func (s *signer) post(url, op string, amount int64) bool {
 	return false
 }
 
+// fetchDomain learns the network domain from the node itself: the
+// hash of entry 0 on its ledger. Signatures bind it (grove-v2), so a
+// loadgen pointed at the wrong network fails closed - every op
+// rejected - instead of silently hammering a foreign chain.
+func fetchDomain(url string) (string, error) {
+	resp, err := http.Get(url + "/ledger")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var entries []struct {
+		Hash string `json:"Hash"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return "", err
+	}
+	if len(entries) == 0 {
+		return "", fmt.Errorf("node at %s has an empty ledger (no genesis yet)", url)
+	}
+	return entries[0].Hash, nil
+}
+
 func main() {
 	url := flag.String("url", "http://localhost:8080", "node base URL")
 	ops := flag.Int("ops", 1000, "total operations")
 	workers := flag.Int("workers", 4, "concurrent workers")
 	flag.Parse()
+
+	domain, err := fetchDomain(*url)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "loadgen: cannot learn the node's domain: %v\n", err)
+		os.Exit(1)
+	}
 
 	var ok, fail int64
 	jobs := make(chan int, *ops)
@@ -82,7 +112,7 @@ func main() {
 				}
 				return
 			}
-			s := &signer{priv: priv, account: pub, next: 1}
+			s := &signer{priv: priv, account: pub, next: 1, domain: domain}
 			for range jobs {
 				amount := int64(rand.Intn(100) + 1)
 				op := identity.OpDeposit

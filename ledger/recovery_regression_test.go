@@ -222,3 +222,80 @@ func TestRecoveryRejectsDuplicateNewJournalEntry(t *testing.T) {
 		t.Fatal("duplicate new journal entry accepted")
 	}
 }
+
+// TestRecoveryTruncatesTornTailAfterMultipleJournaledEntries pins the
+// crash-mid-write case on a non-trivial journal: three committed entries
+// are durably journaled, then the process dies partway through writing
+// the fourth. Only the unterminated tail may be discarded; the three
+// complete lines must replay intact, the torn bytes must be truncated
+// from disk, and a later Save must not re-journal the recovered prefix
+// or duplicate anything.
+func TestRecoveryTruncatesTornTailAfterMultipleJournaledEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chain.json")
+	l := New()
+	for _, p := range []string{"first", "second", "third"} {
+		l.Append(p)
+	}
+	if err := l.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	// Fourth entry committed in memory but never fsync'd: a torn write
+	// stops mid-object with no trailing newline.
+	entry := l.Append("fourth-torn")
+	tail, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(journalPath(path), os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write(tail[:len(tail)/2]); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("multi-entry journal with torn tail rejected: %v", err)
+	}
+	if got.Len() != 3 {
+		t.Fatalf("recovered %d entries, want 3 (torn fourth must be dropped)", got.Len())
+	}
+	for i, want := range []string{"first", "second", "third"} {
+		if got.entries[i].Payload != want {
+			t.Fatalf("entry %d payload=%q, want %q", i, got.entries[i].Payload, want)
+		}
+	}
+	// The torn bytes must be gone from disk: the next append writes its
+	// newline-terminated record at the true end of the file.
+	rest, err := os.ReadFile(journalPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rest) > 0 && rest[len(rest)-1] != '\n' {
+		t.Fatal("torn tail was not truncated from the journal file")
+	}
+	// The in-memory journal accounting must also be right: Save may only
+	// journal entries not yet durable (index 3), never the recovered 0-2.
+	got.Append("fourth-redone")
+	if err := got.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Load(path)
+	if err != nil {
+		t.Fatalf("restart after recovery and append: %v", err)
+	}
+	if restarted.Len() != 4 {
+		t.Fatalf("restarted entries=%d, want 4", restarted.Len())
+	}
+	if restarted.entries[3].Payload != "fourth-redone" {
+		t.Fatalf("entry 3 payload=%q, want %q", restarted.entries[3].Payload, "fourth-redone")
+	}
+	if err := restarted.Verify(); err != nil {
+		t.Fatalf("recovered chain failed verification: %v", err)
+	}
+}
