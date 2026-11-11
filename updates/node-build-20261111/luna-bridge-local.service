@@ -1,0 +1,14 @@
+[Unit]
+Description=Luna bridge agent v1 (local inbox, will-stamped)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/dylha/luna-node/bridge/luna-bridge-local.py
+Restart=on-failure
+RestartSec=5
+CPUQuota=20%
+MemoryMax=256M
+Nice=10
+
+[Install]
+WantedBy=default.target

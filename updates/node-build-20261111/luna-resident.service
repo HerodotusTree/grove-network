@@ -1,0 +1,14 @@
+[Unit]
+Description=Luna resident v0 (standing presence, node)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/dylha/luna-node/resident/luna-resident.py
+Restart=on-failure
+RestartSec=5
+CPUQuota=20%
+MemoryMax=256M
+Nice=10
+
+[Install]
+WantedBy=default.target
